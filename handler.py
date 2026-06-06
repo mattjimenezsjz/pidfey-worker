@@ -5,13 +5,18 @@ try:
     import torch
     import io
     import os
+    
+    # ¡CRÍTICO! Forzar la ruta del caché ANTES de importar cualquier inteligencia artificial
+    # Si esto se pone después, Python lo ignora y descarga en el disco temporal de 5GB.
+    os.environ["HF_HOME"] = "/runpod-volume/models/huggingface"
+    
     import boto3
     import requests
     from PIL import Image
     from diffusers import QwenImageLayeredPipeline, AutoPipelineForImage2Image, QwenImageTransformer2DModel
     from diffusers.utils import load_image
 
-    # Variables de entorno para Storage (Cloudflare R2)....
+    # Variables de entorno para Storage (Cloudflare R2)
     R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
     R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY")
     R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY")
@@ -23,8 +28,6 @@ try:
     QWEN_DIR = "/runpod-volume/models/Qwen-Image-Layered"
     QWEN_FILE = os.path.join(QWEN_DIR, "qwen_image_layered_fp8_e4m3fn.safetensors")
 
-    # Configurar HuggingFace cache en el Network Volume para no descargar 2 veces
-    os.environ["HF_HOME"] = "/runpod-volume/models/huggingface"
     HF_TOKEN = os.environ.get("HF_TOKEN") # Opcional: Para evitar bloqueos de HuggingFace
 
     print("========= DIAGNÓSTICO DE DISCO DURO =========")
