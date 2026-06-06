@@ -56,12 +56,12 @@ try:
         
         # 2. Cargar Qwen-Image-Layered (El Cirujano - FRANKENSTEIN FP8)
         print("Cargando Qwen-Image-Layered (Transformer FP8 + Oficial)...")
-        # Cargamos el archivo FP8 suelto solo como el motor del Transformer
+        # Cargamos el archivo FP8 suelto pero lo pasamos a Float16 para la H100
         transformer_fp8 = QwenImageTransformer2DModel.from_single_file(
             QWEN_FILE,
             config="Qwen/Qwen-Image-Layered",
             subfolder="transformer",
-            torch_dtype=torch.float8_e4m3fn,
+            torch_dtype=torch.float16,
             token=HF_TOKEN
         )
         
