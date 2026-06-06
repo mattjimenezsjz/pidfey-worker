@@ -62,7 +62,7 @@ try:
             token=HF_TOKEN
         )
         
-        # Juntamos el motor FP8 con las demás piezas (VAE, Tokenizer) del repo oficial ...
+        # Juntamos el motor FP8 con las demás piezas (VAE, Tokenizer) del repo oficial
         pipeline_qwen = QwenImageLayeredPipeline.from_pretrained(
             "Qwen/Qwen-Image-Layered", 
             transformer=transformer_fp8,
