@@ -52,7 +52,6 @@ try:
             use_safetensors=True,
             token=HF_TOKEN
         ).to("cuda")
-        pipeline_sdxl.vae = pipeline_sdxl.vae.to(torch.float32) # Evitar imágenes negras/NaN
         pipeline_sdxl.set_progress_bar_config(disable=True)
         
         # 2. Cargar Qwen-Image-Layered (El Cirujano - FRANKENSTEIN FP8)
@@ -73,7 +72,6 @@ try:
             torch_dtype=torch.float16,
             token=HF_TOKEN
         ).to("cuda")
-        pipeline_qwen.vae = pipeline_qwen.vae.to(torch.float32) # Evitar capas en blanco/NaN
         pipeline_qwen.set_progress_bar_config(disable=True)
         
         print("¡Tubería Dual cargada exitosamente en VRAM!")
@@ -148,7 +146,6 @@ try:
                 # PASO 2: Extraer capas con Qwen (El Cirujano)
                 # Aseguramos que la salida de SDXL (RGB) se convierta a RGBA para Qwen
                 qwen_inputs = {
-                    "prompt": prompt,
                     "image": sdxl_output.convert("RGBA"),
                     "generator": torch.Generator(device='cuda').manual_seed(777),
                     "num_inference_steps": 30,
