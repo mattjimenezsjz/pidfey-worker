@@ -52,18 +52,19 @@ try:
             use_safetensors=True,
             token=HF_TOKEN
         ).to("cuda")
+        pipeline_sdxl.vae = pipeline_sdxl.vae.to(torch.float32) # Evitar imágenes negras/NaN
         pipeline_sdxl.set_progress_bar_config(disable=True)
         
         # 2. Cargar Qwen-Image-Layered (El Cirujano - FRANKENSTEIN FP8)
         print("Cargando Qwen-Image-Layered (Transformer FP8 + Oficial)...")
-        # Cargamos el archivo FP8 suelto pero lo pasamos a Float16 para la H100
+        # Cargamos el archivo FP8 suelto nativamente y luego lo inflamos de forma segura a FP16
         transformer_fp8 = QwenImageTransformer2DModel.from_single_file(
             QWEN_FILE,
             config="Qwen/Qwen-Image-Layered",
             subfolder="transformer",
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float8_e4m3fn,
             token=HF_TOKEN
-        )
+        ).to(dtype=torch.float16)
         
         # Juntamos el motor FP8 con las demás piezas (VAE, Tokenizer) del repo oficial
         pipeline_qwen = QwenImageLayeredPipeline.from_pretrained(
@@ -72,6 +73,7 @@ try:
             torch_dtype=torch.float16,
             token=HF_TOKEN
         ).to("cuda")
+        pipeline_qwen.vae = pipeline_qwen.vae.to(torch.float32) # Evitar capas en blanco/NaN
         pipeline_qwen.set_progress_bar_config(disable=True)
         
         print("¡Tubería Dual cargada exitosamente en VRAM!")
@@ -146,6 +148,7 @@ try:
                 # PASO 2: Extraer capas con Qwen (El Cirujano)
                 # Aseguramos que la salida de SDXL (RGB) se convierta a RGBA para Qwen
                 qwen_inputs = {
+                    "prompt": prompt,
                     "image": sdxl_output.convert("RGBA"),
                     "generator": torch.Generator(device='cuda').manual_seed(777),
                     "num_inference_steps": 30,
