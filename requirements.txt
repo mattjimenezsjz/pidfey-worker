@@ -1,6 +1,6 @@
 runpod==1.6.2
 torch==2.3.0
-diffusers==0.30.2
+git+https://github.com/huggingface/diffusers.git
 transformers==4.44.0
 accelerate==0.33.0
 Pillow==10.4.0
