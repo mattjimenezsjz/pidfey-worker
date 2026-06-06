@@ -46,7 +46,10 @@ try:
         # Cargamos el archivo FP8 suelto solo como el motor del Transformer
         transformer_fp8 = QwenImageTransformer2DModel.from_single_file(
             QWEN_FILE,
-            torch_dtype=torch.float8_e4m3fn
+            config="Qwen/Qwen-Image-Layered",
+            subfolder="transformer",
+            torch_dtype=torch.float8_e4m3fn,
+            token=HF_TOKEN
         )
         
         # Juntamos el motor FP8 con las demás piezas (VAE, Tokenizer) del repo oficial
