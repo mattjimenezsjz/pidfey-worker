@@ -11,7 +11,7 @@ try:
     from diffusers import QwenImageLayeredPipeline, AutoPipelineForImage2Image, QwenImageTransformer2DModel
     from diffusers.utils import load_image
 
-    # Variables de entorno para Storage (Cloudflare R2)
+    # Variables de entorno para Storage (Cloudflare R2)....
     R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
     R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY")
     R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY")
