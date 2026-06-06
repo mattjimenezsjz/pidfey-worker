@@ -8,7 +8,7 @@ try:
     import boto3
     import requests
     from PIL import Image
-    from diffusers import QwenImageLayeredPipeline, AutoPipelineForImage2Image
+    from diffusers import QwenImageLayeredPipeline, AutoPipelineForImage2Image, QwenImageTransformer2DModel
     from diffusers.utils import load_image
 
     # Variables de entorno para Storage (Cloudflare R2)
@@ -23,25 +23,38 @@ try:
     QWEN_DIR = "/runpod-volume/models/Qwen-Image-Layered"
     QWEN_FILE = os.path.join(QWEN_DIR, "qwen_image_layered_fp8_e4m3fn.safetensors")
 
+    # Configurar HuggingFace cache en el Network Volume para no descargar 2 veces
+    os.environ["HF_HOME"] = "/runpod-volume/models/huggingface"
+    HF_TOKEN = os.environ.get("HF_TOKEN") # Opcional: Para evitar bloqueos de HuggingFace
+
     print("Inicializando contenedor y cargando TUBERÍA DUAL en H100 (80GB VRAM)...")
 
     try:
-        # 1. Cargar SDXL (El Artista)
-        print("Cargando SDXL Img2Img...")
+        # 1. Cargar SDXL (El Artista) desde el directorio local para no descargarlo de nuevo
+        print("Cargando SDXL Img2Img desde el Network Volume...")
         pipeline_sdxl = AutoPipelineForImage2Image.from_pretrained(
-            "stabilityai/stable-diffusion-xl-base-1.0", # O usar SDXL_DIR si lo tienen descargado
+            SDXL_DIR,
             torch_dtype=torch.float16,
             variant="fp16",
-            use_safetensors=True
+            use_safetensors=True,
+            token=HF_TOKEN
         ).to("cuda")
         pipeline_sdxl.set_progress_bar_config(disable=True)
         
-        # 2. Cargar Qwen-Image-Layered (El Cirujano)
-        print("Cargando Qwen-Image-Layered FP8...")
-        pipeline_qwen = QwenImageLayeredPipeline.from_single_file(
-            QWEN_FILE, 
-            torch_dtype=torch.float8_e4m3fn,
-            local_files_only=True
+        # 2. Cargar Qwen-Image-Layered (El Cirujano - FRANKENSTEIN FP8)
+        print("Cargando Qwen-Image-Layered (Transformer FP8 + Oficial)...")
+        # Cargamos el archivo FP8 suelto solo como el motor del Transformer
+        transformer_fp8 = QwenImageTransformer2DModel.from_single_file(
+            QWEN_FILE,
+            torch_dtype=torch.float8_e4m3fn
+        )
+        
+        # Juntamos el motor FP8 con las demás piezas (VAE, Tokenizer) del repo oficial
+        pipeline_qwen = QwenImageLayeredPipeline.from_pretrained(
+            "Qwen/Qwen-Image-Layered", 
+            transformer=transformer_fp8,
+            torch_dtype=torch.float16,
+            token=HF_TOKEN
         ).to("cuda")
         pipeline_qwen.set_progress_bar_config(disable=True)
         
