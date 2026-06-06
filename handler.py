@@ -27,6 +27,16 @@ try:
     os.environ["HF_HOME"] = "/runpod-volume/models/huggingface"
     HF_TOKEN = os.environ.get("HF_TOKEN") # Opcional: Para evitar bloqueos de HuggingFace
 
+    print("========= DIAGNÓSTICO DE DISCO DURO =========")
+    import subprocess
+    print("Espacio total y libre:")
+    subprocess.run(["df", "-h", "/runpod-volume"], check=False)
+    print("\nPeso de las carpetas dentro de /runpod-volume/models:")
+    subprocess.run(["du", "-sh", "/runpod-volume/models/SDXL"], check=False)
+    subprocess.run(["du", "-sh", "/runpod-volume/models/Qwen-Image-Layered"], check=False)
+    subprocess.run(["du", "-sh", "/runpod-volume/models/huggingface"], check=False)
+    print("===========================================")
+
     print("Inicializando contenedor y cargando TUBERÍA DUAL en H100 (80GB VRAM)...")
 
     try:
