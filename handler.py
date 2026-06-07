@@ -65,10 +65,10 @@ try:
         pipeline_sdxl.set_progress_bar_config(disable=True)
         
         # 2. Cargar Qwen-Image-Layered (El Cirujano - VERSIÓN OFICIAL Y PURA)
-        print("Cargando Qwen-Image-Layered (Versión Oficial FP16)...")
+        print("Cargando Qwen-Image-Layered (Versión Oficial BF16)...")
         pipeline_qwen = QwenImageLayeredPipeline.from_pretrained(
             "Qwen/Qwen-Image-Layered", 
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
             token=HF_TOKEN
         ).to("cuda")
         pipeline_qwen.set_progress_bar_config(disable=True)
