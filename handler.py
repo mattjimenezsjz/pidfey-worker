@@ -52,6 +52,7 @@ try:
             use_safetensors=True,
             token=HF_TOKEN
         ).to("cuda")
+        pipeline_sdxl.vae = pipeline_sdxl.vae.to(torch.float32) # Evitar el bug clásico de NaNs en SDXL
         pipeline_sdxl.set_progress_bar_config(disable=True)
         
         # 2. Cargar Qwen-Image-Layered (El Cirujano - FRANKENSTEIN FP8)
@@ -89,7 +90,7 @@ try:
         region_name="auto",
     )
 
-    def process_and_upload_layer(layer_img: Image.Image, layer_index: int, job_id: str, width_cm: int, height_cm: int, dpi: int):
+    def process_and_upload_layer(layer_img: Image.Image, layer_index, job_id: str, width_cm: int, height_cm: int, dpi: int):
         # 1. Calcular tamaño en píxeles (Fórmula: Pixeles = (Centímetros / 2.54) * DPI)
         target_width_px = int((width_cm / 2.54) * dpi)
         target_height_px = int((height_cm / 2.54) * dpi)
@@ -143,6 +144,9 @@ try:
                     num_inference_steps=40
                 ).images[0]
                 
+                # DEBUG: Subir la imagen base procesada por SDXL para ver si está en blanco
+                sdxl_debug_url = process_and_upload_layer(sdxl_output, "sdxl_debug", job_id, print_width_cm, print_height_cm, print_dpi)
+                
                 # PASO 2: Extraer capas con Qwen (El Cirujano)
                 # Aseguramos que la salida de SDXL (RGB) se convierta a RGBA para Qwen
                 qwen_inputs = {
@@ -163,6 +167,7 @@ try:
             return {
                 "success": True,
                 "message": "Transformación Img2Img + Extracción de Capas completada exitosamente.",
+                "sdxl_base_image": sdxl_debug_url,
                 "layers": layer_urls
             }
             
