@@ -40,6 +40,15 @@ try:
     subprocess.run(["du", "-sh", "/runpod-volume/models/huggingface"], check=False)
     print("===========================================")
 
+    # Limpieza automática: Borrar el archivo FP8 defectuoso si aún existe para liberar 19 GB
+    if os.path.exists(QWEN_FILE):
+        try:
+            print("Limpieza: Borrando archivo FP8 defectuoso para recuperar 19GB de espacio...")
+            os.remove(QWEN_FILE)
+            print("Archivo FP8 borrado con éxito.")
+        except Exception as e:
+            print(f"No se pudo borrar el FP8: {e}")
+
     print("Inicializando contenedor y cargando TUBERÍA DUAL en H100 (80GB VRAM)...")
 
     try:
@@ -55,21 +64,10 @@ try:
         pipeline_sdxl.vae = pipeline_sdxl.vae.to(torch.float32) # Evitar el bug clásico de NaNs en SDXL
         pipeline_sdxl.set_progress_bar_config(disable=True)
         
-        # 2. Cargar Qwen-Image-Layered (El Cirujano - FRANKENSTEIN FP8)
-        print("Cargando Qwen-Image-Layered (Transformer FP8 + Oficial)...")
-        # Cargamos el archivo FP8 suelto nativamente y luego lo inflamos de forma segura a FP16
-        transformer_fp8 = QwenImageTransformer2DModel.from_single_file(
-            QWEN_FILE,
-            config="Qwen/Qwen-Image-Layered",
-            subfolder="transformer",
-            torch_dtype=torch.float8_e4m3fn,
-            token=HF_TOKEN
-        ).to(dtype=torch.float16)
-        
-        # Juntamos el motor FP8 con las demás piezas (VAE, Tokenizer) del repo oficial
+        # 2. Cargar Qwen-Image-Layered (El Cirujano - VERSIÓN OFICIAL Y PURA)
+        print("Cargando Qwen-Image-Layered (Versión Oficial FP16)...")
         pipeline_qwen = QwenImageLayeredPipeline.from_pretrained(
             "Qwen/Qwen-Image-Layered", 
-            transformer=transformer_fp8,
             torch_dtype=torch.float16,
             token=HF_TOKEN
         ).to("cuda")
