@@ -11,9 +11,10 @@ try:
     os.environ["HF_HOME"] = "/runpod-volume/models/huggingface"
     
     import boto3
+    import shutil
     import requests
     from PIL import Image
-    from diffusers import QwenImageLayeredPipeline, AutoPipelineForImage2Image, QwenImageTransformer2DModel
+    from diffusers import QwenImageLayeredPipeline, QwenImageTransformer2DModel
     from diffusers.utils import load_image
 
     # Variables de entorno para Storage (Cloudflare R2)
@@ -24,7 +25,6 @@ try:
     R2_PUBLIC_DOMAIN = os.environ.get("R2_PUBLIC_DOMAIN", "https://assets.pidfey.pro")
 
     # Rutas del Network Volume (El Rayo ⚡)
-    SDXL_DIR = "/runpod-volume/models/SDXL"
     QWEN_DIR = "/runpod-volume/models/Qwen-Image-Layered"
     QWEN_FILE = os.path.join(QWEN_DIR, "qwen_image_layered_fp8_e4m3fn.safetensors")
 
@@ -35,7 +35,6 @@ try:
     print("Espacio total y libre:")
     subprocess.run(["df", "-h", "/runpod-volume"], check=False)
     print("\nPeso de las carpetas dentro de /runpod-volume/models:")
-    subprocess.run(["du", "-sh", "/runpod-volume/models/SDXL"], check=False)
     subprocess.run(["du", "-sh", "/runpod-volume/models/Qwen-Image-Layered"], check=False)
     subprocess.run(["du", "-sh", "/runpod-volume/models/huggingface"], check=False)
     print("===========================================")
@@ -49,22 +48,20 @@ try:
         except Exception as e:
             print(f"No se pudo borrar el FP8: {e}")
 
+    # Limpieza automática: Extirpar SDXL del disco duro para recuperar 7 GB
+    SDXL_DIR_TO_DELETE = "/runpod-volume/models/SDXL"
+    if os.path.exists(SDXL_DIR_TO_DELETE):
+        try:
+            print(f"Limpieza: Borrando modelos pesados de SDXL en {SDXL_DIR_TO_DELETE}...")
+            shutil.rmtree(SDXL_DIR_TO_DELETE)
+            print("¡SDXL erradicado del disco duro exitosamente! (7GB liberados)")
+        except Exception as e:
+            print(f"Advertencia: No se pudo borrar SDXL: {e}")
+
     print("Inicializando contenedor y cargando TUBERÍA DUAL en H100 (80GB VRAM)...")
 
     try:
-        # 1. Cargar SDXL (El Artista) desde el directorio local para no descargarlo de nuevo
-        print("Cargando SDXL Img2Img desde el Network Volume...")
-        pipeline_sdxl = AutoPipelineForImage2Image.from_pretrained(
-            SDXL_DIR,
-            torch_dtype=torch.float16,
-            variant="fp16",
-            use_safetensors=True,
-            token=HF_TOKEN
-        ).to("cuda")
-        pipeline_sdxl.vae = pipeline_sdxl.vae.to(torch.float32) # Evitar el bug clásico de NaNs en SDXL
-        pipeline_sdxl.set_progress_bar_config(disable=True)
-        
-        # 2. Cargar Qwen-Image-Layered (El Cirujano - VERSIÓN OFICIAL Y PURA)
+        # 1. Cargar Qwen-Image-Layered (El Cirujano - VERSIÓN OFICIAL Y PURA)
         print("Cargando Qwen-Image-Layered (Versión Oficial BF16)...")
         pipeline_qwen = QwenImageLayeredPipeline.from_pretrained(
             "Qwen/Qwen-Image-Layered", 
@@ -76,7 +73,6 @@ try:
         print("¡Tubería Dual cargada exitosamente en VRAM!")
     except Exception as e:
         print(f"Advertencia Crítica: Fallo al cargar los modelos. Detalle: {e}")
-        pipeline_sdxl = None
         pipeline_qwen = None
 
     # Cliente S3 para Cloudflare R2
@@ -118,7 +114,7 @@ try:
         print_dpi = int(job_input.get('print_dpi', 300))
         strength = float(job_input.get('strength', 0.75)) # Qué tanto cambiar la imagen original
         
-        if not pipeline_sdxl or not pipeline_qwen:
+        if not pipeline_qwen:
             return {"error": "Los modelos no están cargados correctamente. Revisa los logs de inicialización."}
 
         if not image_url:
@@ -133,22 +129,10 @@ try:
             
             # Inferencia Tubería Dual en la H100
             with torch.inference_mode():
-                # PASO 1: Redibujar con SDXL (El Artista)
-                sdxl_output = pipeline_sdxl(
-                    prompt=prompt, 
-                    image=input_image, 
-                    strength=strength, 
-                    guidance_scale=7.5,
-                    num_inference_steps=40
-                ).images[0]
-                
-                # DEBUG: Subir la imagen base procesada por SDXL para ver si está en blanco
-                sdxl_debug_url = process_and_upload_layer(sdxl_output, "sdxl_debug", job_id, print_width_cm, print_height_cm, print_dpi)
-                
-                # PASO 2: Extraer capas con Qwen (El Cirujano)
-                # Aseguramos que la salida de SDXL (RGB) se convierta a RGBA para Qwen
+                # Extraer capas con Qwen (El Cirujano)
+                # Aseguramos que la imagen original se convierta a RGBA para Qwen
                 qwen_inputs = {
-                    "image": sdxl_output.convert("RGBA"),
+                    "image": input_image.convert("RGBA"),
                     "generator": torch.Generator(device='cuda').manual_seed(777),
                     "num_inference_steps": 30,
                     "layers": 4, 
@@ -164,8 +148,7 @@ try:
                 
             return {
                 "success": True,
-                "message": "Transformación Img2Img + Extracción de Capas completada exitosamente.",
-                "sdxl_base_image": sdxl_debug_url,
+                "message": "Extracción de Capas completada exitosamente.",
                 "layers": layer_urls
             }
             
