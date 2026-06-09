@@ -5,6 +5,7 @@ try:
     import torch
     import io
     import os
+    import numpy as np
     
     # ¡CRÍTICO! Forzar la ruta del caché ANTES de importar cualquier inteligencia artificial
     # Si esto se pone después, Python lo ignora y descarga en el disco temporal de 5GB.
@@ -84,21 +85,31 @@ try:
         region_name="auto",
     )
 
-    def process_and_upload_layer(layer_img: Image.Image, layer_index, job_id: str, width_cm: int, height_cm: int, dpi: int):
-        # 1. Calcular tamaño en píxeles (Fórmula: Pixeles = (Centímetros / 2.54) * DPI)
-        target_width_px = int((width_cm / 2.54) * dpi)
-        target_height_px = int((height_cm / 2.54) * dpi)
+    def process_and_upload_layer(layer_img: Image.Image, name_suffix: str, job_id: str, max_width_cm: int, max_height_cm: int, dpi: int):
+        # 1. Calcular escalado proporcional inteligente (Aspect Ratio)
+        orig_w, orig_h = layer_img.size
+        # Tamaño máximo en píxeles
+        max_target_w_px = int((max_width_cm / 2.54) * dpi)
+        max_target_h_px = int((max_height_cm / 2.54) * dpi)
         
-        # 2. Redimensionar usando LANCZOS
-        resized_img = layer_img.resize((target_width_px, target_height_px), Image.Resampling.LANCZOS)
+        # Calcular proporciones
+        ratio_w = max_target_w_px / orig_w
+        ratio_h = max_target_h_px / orig_h
+        ratio = min(ratio_w, ratio_h) # Usamos el mínimo para que encaje sin salirse
         
-        # 3. Guardar con metadata 300 DPI
+        target_w = int(orig_w * ratio)
+        target_h = int(orig_h * ratio)
+        
+        # 2. Redimensionar usando LANCZOS manteniendo proporción
+        resized_img = layer_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        
+        # 3. Guardar con metadata DPI
         buffer = io.BytesIO()
         resized_img.save(buffer, format="PNG", dpi=(dpi, dpi))
         buffer.seek(0)
         
         # 4. Subir a R2
-        file_key = f"jobs/{job_id}/layer_{layer_index}.png"
+        file_key = f"jobs/{job_id}/{name_suffix}.png"
         s3_client.upload_fileobj(buffer, R2_BUCKET_NAME, file_key, ExtraArgs={"ContentType": "image/png"})
         return f"{R2_PUBLIC_DOMAIN}/{file_key}"
 
@@ -120,19 +131,18 @@ try:
         if not image_url:
             return {"error": "Se requiere una image_url base para la transformación Img2Img."}
 
-        print(f"Job {job_id}: Procesando '{prompt}' a {print_width_cm}x{print_height_cm}cm ({print_dpi} DPI)")
+        print(f"Job {job_id}: Procesando a {print_width_cm}x{print_height_cm}cm ({print_dpi} DPI)")
 
         try:
             # Descargar imagen base
             response = requests.get(image_url)
-            input_image = Image.open(io.BytesIO(response.content)).convert("RGB")
+            input_image = Image.open(io.BytesIO(response.content)).convert("RGBA") # Directo a RGBA
             
             # Inferencia Tubería Dual en la H100
             with torch.inference_mode():
                 # Extraer capas con Qwen (El Cirujano)
-                # Aseguramos que la imagen original se convierta a RGBA para Qwen
                 qwen_inputs = {
-                    "image": input_image.convert("RGBA"),
+                    "image": input_image,
                     "generator": torch.Generator(device='cuda').manual_seed(777),
                     "num_inference_steps": 30,
                     "layers": 4, 
@@ -140,15 +150,45 @@ try:
                 qwen_output = pipeline_qwen(**qwen_inputs)
                 output_image_layers = qwen_output.images[0]
 
-            # PASO 3: Procesar, redimensionar, inyectar DPI y subir
-            layer_urls = []
+            # PASO 3: Limpiar polvo, Acoplar (Compositing) y Subir
+            composite_img = None
+            clean_layers = []
+            
             for i, layer_img in enumerate(output_image_layers):
-                url = process_and_upload_layer(layer_img, i, job_id, print_width_cm, print_height_cm, print_dpi)
+                # Limpiar polvo: Alpha < 20 = 0
+                l_img = layer_img.convert("RGBA")
+                r, g, b, a = l_img.split()
+                alfa_np = np.array(a)
+                alfa_np[alfa_np < 20] = 0
+                alfa_limpio = Image.fromarray(alfa_np)
+                clean_layer = Image.merge("RGBA", (r, g, b, alfa_limpio))
+                clean_layers.append(clean_layer)
+                
+                # Ignoramos la capa 0 para el composite (fondo de Qwen)
+                if i > 0:
+                    if composite_img is None:
+                        composite_img = clean_layer.copy()
+                    else:
+                        composite_img.alpha_composite(clean_layer)
+
+            # Fallback en caso de que solo haya capa 0
+            if composite_img is None:
+                composite_img = clean_layers[0]
+
+            layer_urls = []
+            
+            # Subir el composite (Acoplado)
+            composite_url = process_and_upload_layer(composite_img, "final_composite_300dpi", job_id, print_width_cm, print_height_cm, print_dpi)
+            
+            # Subir capas segmentadas individuales
+            for i, c_layer in enumerate(clean_layers):
+                url = process_and_upload_layer(c_layer, f"layer_{i}", job_id, print_width_cm, print_height_cm, print_dpi)
                 layer_urls.append({"name": f"layer_{i}.png", "url": url})
                 
             return {
                 "success": True,
-                "message": "Extracción de Capas completada exitosamente.",
+                "message": "Extracción y Acoplado completado exitosamente.",
+                "composite_url": composite_url,
                 "layers": layer_urls
             }
             
