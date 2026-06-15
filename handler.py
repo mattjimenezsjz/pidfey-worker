@@ -103,6 +103,7 @@ try:
         if session is None:
             return img
             
+        print("Ejecutando Real-ESRGAN x4 en la imagen base...")
         img_np = np.array(img.convert("RGB")).astype(np.float32) / 255.0
         img_np = np.transpose(img_np, (2, 0, 1))
         img_np = np.expand_dims(img_np, axis=0)
@@ -130,12 +131,8 @@ try:
         return upscaled_img
 
     def process_and_upload_layer(layer_img: Image.Image, name_suffix: str, job_id: str, max_width_cm: int, max_height_cm: int, dpi: int):
-        # 0. El Músculo (Real-ESRGAN x4)
-        print(f"Aplicando Súper Resolución x4 a {name_suffix}...")
-        upscaled_layer = upscale_with_esrgan(layer_img, esrgan_session)
-
         # 1. Calcular escalado proporcional inteligente (Aspect Ratio)
-        orig_w, orig_h = upscaled_layer.size
+        orig_w, orig_h = layer_img.size
         # Tamaño máximo en píxeles
         max_target_w_px = int((max_width_cm / 2.54) * dpi)
         max_target_h_px = int((max_height_cm / 2.54) * dpi)
@@ -149,8 +146,7 @@ try:
         target_h = int(orig_h * ratio)
         
         # 2. Redimensionar usando LANCZOS manteniendo proporción
-        print(f"Comprimiendo {name_suffix} a {target_w}x{target_h}px...")
-        resized_img = upscaled_layer.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        resized_img = layer_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
         
         # 3. Guardar con metadata DPI
         buffer = io.BytesIO()
@@ -187,11 +183,14 @@ try:
             response = requests.get(image_url)
             input_image = Image.open(io.BytesIO(response.content)).convert("RGBA") # Directo a RGBA
             
+            # 1. ENGORDAR LA IMAGEN BASE CON REAL-ESRGAN (El Músculo primero)
+            upscaled_input = upscale_with_esrgan(input_image, esrgan_session)
+            
             # Inferencia Tubería Dual en la H100
             with torch.inference_mode():
-                # Extraer capas con Qwen (El Cirujano)
+                # Extraer capas con Qwen (El Cirujano en Alta Resolución)
                 qwen_inputs = {
-                    "image": input_image,
+                    "image": upscaled_input,
                     "generator": torch.Generator(device='cuda').manual_seed(777),
                     "num_inference_steps": 30,
                     "layers": 4, 
@@ -261,3 +260,4 @@ except Exception as boot_error:
         }
         
     runpod.serverless.start({"handler": crash_handler})
+
