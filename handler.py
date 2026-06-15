@@ -17,6 +17,7 @@ try:
     from PIL import Image
     from diffusers import QwenImageLayeredPipeline, QwenImageTransformer2DModel
     from diffusers.utils import load_image
+    import onnxruntime as ort
 
     # Variables de entorno para Storage (Cloudflare R2)
     R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
@@ -28,6 +29,7 @@ try:
     # Rutas del Network Volume (El Rayo ⚡)
     QWEN_DIR = "/runpod-volume/models/Qwen-Image-Layered"
     QWEN_FILE = os.path.join(QWEN_DIR, "qwen_image_layered_fp8_e4m3fn.safetensors")
+    ESRGAN_FILE = "/runpod-volume/models/RealESRGAN_x4plus_anime_6B.onnx"
 
     HF_TOKEN = os.environ.get("HF_TOKEN") # Opcional: Para evitar bloqueos de HuggingFace
 
@@ -72,9 +74,21 @@ try:
         pipeline_qwen.set_progress_bar_config(disable=True)
         
         print("¡Tubería Dual cargada exitosamente en VRAM!")
+        
+        # 2. Cargar Real-ESRGAN (El Músculo)
+        print("Cargando Real-ESRGAN (ONNX)...")
+        if os.path.exists(ESRGAN_FILE):
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            esrgan_session = ort.InferenceSession(ESRGAN_FILE, providers=providers)
+            print("¡Real-ESRGAN cargado exitosamente en VRAM!")
+        else:
+            print("⚠️ No se encontró Real-ESRGAN en el disco duro. Se omitirá el escalado.")
+            esrgan_session = None
+
     except Exception as e:
         print(f"Advertencia Crítica: Fallo al cargar los modelos. Detalle: {e}")
         pipeline_qwen = None
+        esrgan_session = None
 
     # Cliente S3 para Cloudflare R2
     s3_client = boto3.client(
@@ -85,9 +99,43 @@ try:
         region_name="auto",
     )
 
+    def upscale_with_esrgan(img: Image.Image, session) -> Image.Image:
+        if session is None:
+            return img
+            
+        img_np = np.array(img.convert("RGB")).astype(np.float32) / 255.0
+        img_np = np.transpose(img_np, (2, 0, 1))
+        img_np = np.expand_dims(img_np, axis=0)
+        
+        ort_inputs = {session.get_inputs()[0].name: img_np}
+        ort_outs = session.run(None, ort_inputs)
+        
+        output_np = ort_outs[0][0]
+        output_np = np.clip(output_np, 0.0, 1.0)
+        output_np = np.transpose(output_np, (1, 2, 0))
+        output_np = (output_np * 255.0).round().astype(np.uint8)
+        
+        upscaled_img = Image.fromarray(output_np, "RGB")
+        
+        if "A" in img.getbands():
+            alpha = img.split()[-1]
+            target_size = upscaled_img.size
+            alpha_upscaled = alpha.resize(target_size, Image.Resampling.BICUBIC)
+            alpha_np = np.array(alpha_upscaled)
+            alpha_np[alpha_np < 128] = 0
+            alpha_np[alpha_np >= 128] = 255
+            alpha_upscaled = Image.fromarray(alpha_np)
+            upscaled_img.putalpha(alpha_upscaled)
+            
+        return upscaled_img
+
     def process_and_upload_layer(layer_img: Image.Image, name_suffix: str, job_id: str, max_width_cm: int, max_height_cm: int, dpi: int):
+        # 0. El Músculo (Real-ESRGAN x4)
+        print(f"Aplicando Súper Resolución x4 a {name_suffix}...")
+        upscaled_layer = upscale_with_esrgan(layer_img, esrgan_session)
+
         # 1. Calcular escalado proporcional inteligente (Aspect Ratio)
-        orig_w, orig_h = layer_img.size
+        orig_w, orig_h = upscaled_layer.size
         # Tamaño máximo en píxeles
         max_target_w_px = int((max_width_cm / 2.54) * dpi)
         max_target_h_px = int((max_height_cm / 2.54) * dpi)
@@ -101,7 +149,8 @@ try:
         target_h = int(orig_h * ratio)
         
         # 2. Redimensionar usando LANCZOS manteniendo proporción
-        resized_img = layer_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        print(f"Comprimiendo {name_suffix} a {target_w}x{target_h}px...")
+        resized_img = upscaled_layer.resize((target_w, target_h), Image.Resampling.LANCZOS)
         
         # 3. Guardar con metadata DPI
         buffer = io.BytesIO()
@@ -212,4 +261,3 @@ except Exception as boot_error:
         }
         
     runpod.serverless.start({"handler": crash_handler})
-
