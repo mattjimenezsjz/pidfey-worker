@@ -17,7 +17,6 @@ try:
     from PIL import Image
     from diffusers import QwenImageLayeredPipeline, QwenImageTransformer2DModel
     from diffusers.utils import load_image
-    import onnxruntime as ort
 
     # Variables de entorno para Storage (Cloudflare R2)
     R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
@@ -29,7 +28,6 @@ try:
     # Rutas del Network Volume (El Rayo ⚡)
     QWEN_DIR = "/runpod-volume/models/Qwen-Image-Layered"
     QWEN_FILE = os.path.join(QWEN_DIR, "qwen_image_layered_fp8_e4m3fn.safetensors")
-    ESRGAN_FILE = "/runpod-volume/models/RealESRGAN_x4plus_anime_6B.onnx"
 
     HF_TOKEN = os.environ.get("HF_TOKEN") # Opcional: Para evitar bloqueos de HuggingFace
 
@@ -74,21 +72,9 @@ try:
         pipeline_qwen.set_progress_bar_config(disable=True)
         
         print("¡Tubería Dual cargada exitosamente en VRAM!")
-        
-        # 2. Cargar Real-ESRGAN (El Músculo)
-        print("Cargando Real-ESRGAN (ONNX)...")
-        if os.path.exists(ESRGAN_FILE):
-            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-            esrgan_session = ort.InferenceSession(ESRGAN_FILE, providers=providers)
-            print("¡Real-ESRGAN cargado exitosamente en VRAM!")
-        else:
-            print("⚠️ No se encontró Real-ESRGAN en el disco duro. Se omitirá el escalado.")
-            esrgan_session = None
-
     except Exception as e:
         print(f"Advertencia Crítica: Fallo al cargar los modelos. Detalle: {e}")
         pipeline_qwen = None
-        esrgan_session = None
 
     # Cliente S3 para Cloudflare R2
     s3_client = boto3.client(
@@ -98,37 +84,6 @@ try:
         aws_secret_access_key = R2_SECRET_KEY,
         region_name="auto",
     )
-
-    def upscale_with_esrgan(img: Image.Image, session) -> Image.Image:
-        if session is None:
-            return img
-            
-        print("Ejecutando Real-ESRGAN x4 en la imagen base...")
-        img_np = np.array(img.convert("RGB")).astype(np.float32) / 255.0
-        img_np = np.transpose(img_np, (2, 0, 1))
-        img_np = np.expand_dims(img_np, axis=0)
-        
-        ort_inputs = {session.get_inputs()[0].name: img_np}
-        ort_outs = session.run(None, ort_inputs)
-        
-        output_np = ort_outs[0][0]
-        output_np = np.clip(output_np, 0.0, 1.0)
-        output_np = np.transpose(output_np, (1, 2, 0))
-        output_np = (output_np * 255.0).round().astype(np.uint8)
-        
-        upscaled_img = Image.fromarray(output_np, "RGB")
-        
-        if "A" in img.getbands():
-            alpha = img.split()[-1]
-            target_size = upscaled_img.size
-            alpha_upscaled = alpha.resize(target_size, Image.Resampling.BICUBIC)
-            alpha_np = np.array(alpha_upscaled)
-            alpha_np[alpha_np < 128] = 0
-            alpha_np[alpha_np >= 128] = 255
-            alpha_upscaled = Image.fromarray(alpha_np)
-            upscaled_img.putalpha(alpha_upscaled)
-            
-        return upscaled_img
 
     def process_and_upload_layer(layer_img: Image.Image, name_suffix: str, job_id: str, max_width_cm: int, max_height_cm: int, dpi: int):
         # 1. Calcular escalado proporcional inteligente (Aspect Ratio)
@@ -183,14 +138,11 @@ try:
             response = requests.get(image_url)
             input_image = Image.open(io.BytesIO(response.content)).convert("RGBA") # Directo a RGBA
             
-            # 1. ENGORDAR LA IMAGEN BASE CON REAL-ESRGAN (El Músculo primero)
-            upscaled_input = upscale_with_esrgan(input_image, esrgan_session)
-            
             # Inferencia Tubería Dual en la H100
             with torch.inference_mode():
-                # Extraer capas con Qwen (El Cirujano en Alta Resolución)
+                # Extraer capas con Qwen (El Cirujano)
                 qwen_inputs = {
-                    "image": upscaled_input,
+                    "image": input_image,
                     "generator": torch.Generator(device='cuda').manual_seed(777),
                     "num_inference_steps": 30,
                     "layers": 4, 
