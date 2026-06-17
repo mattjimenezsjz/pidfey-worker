@@ -17,6 +17,7 @@ try:
     from PIL import Image
     from diffusers import QwenImageLayeredPipeline, QwenImageTransformer2DModel
     from diffusers.utils import load_image
+    import onnxruntime as ort
 
     # Variables de entorno para Storage (Cloudflare R2)
     R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
@@ -28,6 +29,7 @@ try:
     # Rutas del Network Volume (El Rayo ⚡)
     QWEN_DIR = "/runpod-volume/models/Qwen-Image-Layered"
     QWEN_FILE = os.path.join(QWEN_DIR, "qwen_image_layered_fp8_e4m3fn.safetensors")
+    ESRGAN_FILE = "/runpod-volume/models/RealESRGAN_x4plus_anime_6B.onnx"
 
     HF_TOKEN = os.environ.get("HF_TOKEN") # Opcional: Para evitar bloqueos de HuggingFace
 
@@ -59,6 +61,52 @@ try:
         except Exception as e:
             print(f"Advertencia: No se pudo borrar SDXL: {e}")
 
+    # ==========================================================
+    # INSTALACIÓN AUTOMÁTICA DE REAL-CUGAN EN EL NETWORK VOLUME
+    # ==========================================================
+    CUGAN_BIN_DIR = "/runpod-volume/bin/cugan"
+    CUGAN_EXE = os.path.join(CUGAN_BIN_DIR, "realcugan-ncnn-vulkan")
+    
+    if not os.path.exists(CUGAN_EXE):
+        print("⚡ Instalando Real-CUGAN (Ubuntu) en el Network Volume por primera vez...")
+        os.makedirs(CUGAN_BIN_DIR, exist_ok=True)
+        # Descargamos la versión oficial de Ubuntu desde GitHub
+        subprocess.run(["wget", "https://github.com/nihui/realcugan-ncnn-vulkan/releases/download/20220728/realcugan-ncnn-vulkan-20220728-ubuntu.zip", "-O", "/tmp/cugan.zip"], check=True)
+        subprocess.run(["unzip", "-o", "/tmp/cugan.zip", "-d", "/tmp/"], check=True)
+        # Movemos los archivos al disco de red persistente
+        subprocess.run(["mv", "/tmp/realcugan-ncnn-vulkan-20220728-ubuntu/realcugan-ncnn-vulkan", CUGAN_EXE], check=True)
+        subprocess.run(["mv", "/tmp/realcugan-ncnn-vulkan-20220728-ubuntu/models-se", os.path.join(CUGAN_BIN_DIR, "models-se")], check=True)
+        # Damos permisos de ejecución
+        subprocess.run(["chmod", "+x", CUGAN_EXE], check=True)
+        print("✅ Real-CUGAN (models-se) instalado exitosamente.")
+
+    # ==========================================================
+    # PRE-FLIGHT CHECK DE VULKAN (PREVENCIÓN DE CAÍDAS)
+    # ==========================================================
+    print("🛡️ Ejecutando diagnóstico de seguridad de Vulkan GPU...")
+    VULKAN_READY = False
+    try:
+        # Creamos una imagen diminuta para prueba
+        test_img = Image.new('RGB', (10, 10), color = 'black')
+        test_in = "/tmp/test_vulkan_in.png"
+        test_out = "/tmp/test_vulkan_out.png"
+        test_img.save(test_in)
+        
+        # Ejecutamos CUGAN para ver si detecta la GPU o explota
+        test_cmd = [CUGAN_EXE, "-i", test_in, "-o", test_out, "-s", "2"]
+        test_result = subprocess.run(test_cmd, capture_output=True, text=True)
+        
+        # Si devuelve código 0 y el archivo sale, significa que la tarjeta gráfica (Vulkan) lo procesó.
+        if test_result.returncode == 0 and os.path.exists(test_out):
+            VULKAN_READY = True
+            print("🚀 VULKAN ESTÁ ACTIVO Y ENLAZADO A LA GPU. Modo Súper Resolución ENABLED.")
+        else:
+            print("⚠️ ADVERTENCIA: RunPod tiene bloqueado el driver Vulkan en este contenedor.")
+            print(f"Log de error: {test_result.stderr}")
+            print("⚠️ Activando Plan B: Fallback automático a modo Lanczos (Seguridad máxima).")
+    except Exception as e:
+        print(f"⚠️ Error en Pre-flight Check: {e}. Activando Plan B (Lanczos).")
+
     print("Inicializando contenedor y cargando TUBERÍA DUAL en H100 (80GB VRAM)...")
 
     try:
@@ -72,9 +120,21 @@ try:
         pipeline_qwen.set_progress_bar_config(disable=True)
         
         print("¡Tubería Dual cargada exitosamente en VRAM!")
+        
+        # 2. Cargar Real-ESRGAN (El Músculo)
+        print("Cargando Real-ESRGAN (ONNX)...")
+        if os.path.exists(ESRGAN_FILE):
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            esrgan_session = ort.InferenceSession(ESRGAN_FILE, providers=providers)
+            print("¡Real-ESRGAN cargado exitosamente en VRAM!")
+        else:
+            print("⚠️ No se encontró Real-ESRGAN en el disco duro. Se omitirá el escalado.")
+            esrgan_session = None
+
     except Exception as e:
         print(f"Advertencia Crítica: Fallo al cargar los modelos. Detalle: {e}")
         pipeline_qwen = None
+        esrgan_session = None
 
     # Cliente S3 para Cloudflare R2
     s3_client = boto3.client(
@@ -84,6 +144,98 @@ try:
         aws_secret_access_key = R2_SECRET_KEY,
         region_name="auto",
     )
+
+    def ai_upscale_layer(layer_img: Image.Image, scale: int = 4) -> Image.Image:
+        """Súper Resolución Inteligente usando Real-CUGAN con Tiling."""
+        if not VULKAN_READY:
+            # Si Vulkan falló en el arranque, devolvemos la imagen original
+            # El algoritmo de process_and_upload_layer se encargará de usar Lanczos
+            return layer_img
+
+        tmp_in = "/tmp/cugan_in.png"
+        tmp_out = "/tmp/cugan_out.png"
+        
+        # 1. Guardar la imagen extraída de Qwen
+        layer_img.save(tmp_in, "PNG")
+        
+        # 2. Ejecutar CUGAN con models-se y tiling 1024 (Optimizadísimo para H100)
+        cmd = [
+            CUGAN_EXE, 
+            "-i", tmp_in, 
+            "-o", tmp_out, 
+            "-s", str(scale),
+            "-m", os.path.join(CUGAN_BIN_DIR, "models-se"),
+            "-n", "-1", # Ruido por defecto
+            "-t", "1024" # Tiling optimizado para VRAM de gran capacidad
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0 and os.path.exists(tmp_out):
+            upscaled_img = Image.open(tmp_out).convert("RGBA")
+            return upscaled_img
+        else:
+            print(f"Error en CUGAN durante Inferencia: {result.stderr}")
+            return layer_img
+
+    def process_and_upload_layer(layer_img: Image.Image, name_suffix: str, job_id: str, max_width_cm: int, max_height_cm: int, dpi: int):
+        # 1. Calcular escalado proporcional inteligente (Aspect Ratio)
+        orig_w, orig_h = layer_img.size
+        # Tamaño máximo en píxeles
+        max_target_w_px = int((max_width_cm / 2.54) * dpi)
+        max_target_h_px = int((max_height_cm / 2.54) * dpi)
+        
+        # Calcular proporciones
+        ratio_w = max_target_w_px / orig_w
+        ratio_h = max_target_h_px / orig_h
+        ratio = min(ratio_w, ratio_h) # Usamos el mínimo para que encaje sin salirse
+        
+        target_w = int(orig_w * ratio)
+        target_h = int(orig_h * ratio)
+        
+        # 2. Redimensionar usando LANCZOS manteniendo proporción
+        resized_img = layer_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        
+        # 3. Guardar con metadata DPI
+        buffer = io.BytesIO()
+        resized_img.save(buffer, format="PNG", dpi=(dpi, dpi))
+        buffer.seek(0)
+        
+        # 4. Subir a R2
+        file_key = f"jobs/{job_id}/{name_suffix}.png"
+        s3_client.upload_fileobj(buffer, R2_BUCKET_NAME, file_key, ExtraArgs={"ContentType": "image/png"})
+        return f"{R2_PUBLIC_DOMAIN}/{file_key}"
+
+    def upscale_with_esrgan(img: Image.Image, session) -> Image.Image:
+        if session is None:
+            return img
+            
+        print("Ejecutando Real-ESRGAN x4 en la imagen base...")
+        img_np = np.array(img.convert("RGB")).astype(np.float32) / 255.0
+        img_np = np.transpose(img_np, (2, 0, 1))
+        img_np = np.expand_dims(img_np, axis=0)
+        
+        ort_inputs = {session.get_inputs()[0].name: img_np}
+        ort_outs = session.run(None, ort_inputs)
+        
+        output_np = ort_outs[0][0]
+        output_np = np.clip(output_np, 0.0, 1.0)
+        output_np = np.transpose(output_np, (1, 2, 0))
+        output_np = (output_np * 255.0).round().astype(np.uint8)
+        
+        upscaled_img = Image.fromarray(output_np, "RGB")
+        
+        if "A" in img.getbands():
+            alpha = img.split()[-1]
+            target_size = upscaled_img.size
+            alpha_upscaled = alpha.resize(target_size, Image.Resampling.BICUBIC)
+            alpha_np = np.array(alpha_upscaled)
+            alpha_np[alpha_np < 128] = 0
+            alpha_np[alpha_np >= 128] = 255
+            alpha_upscaled = Image.fromarray(alpha_np)
+            upscaled_img.putalpha(alpha_upscaled)
+            
+        return upscaled_img
 
     def process_and_upload_layer(layer_img: Image.Image, name_suffix: str, job_id: str, max_width_cm: int, max_height_cm: int, dpi: int):
         # 1. Calcular escalado proporcional inteligente (Aspect Ratio)
@@ -138,11 +290,14 @@ try:
             response = requests.get(image_url)
             input_image = Image.open(io.BytesIO(response.content)).convert("RGBA") # Directo a RGBA
             
+            # 1. ENGORDAR LA IMAGEN BASE CON REAL-ESRGAN (El Músculo primero)
+            upscaled_input = upscale_with_esrgan(input_image, esrgan_session)
+            
             # Inferencia Tubería Dual en la H100
             with torch.inference_mode():
-                # Extraer capas con Qwen (El Cirujano)
+                # Extraer capas con Qwen (El Cirujano en Alta Resolución)
                 qwen_inputs = {
-                    "image": input_image,
+                    "image": upscaled_input,
                     "generator": torch.Generator(device='cuda').manual_seed(777),
                     "num_inference_steps": 30,
                     "layers": 4, 
@@ -150,7 +305,7 @@ try:
                 qwen_output = pipeline_qwen(**qwen_inputs)
                 output_image_layers = qwen_output.images[0]
 
-            # PASO 3: Limpiar polvo, Acoplar (Compositing) y Subir
+            # PASO 3: Limpiar polvo, Upscale 4K con IA, Acoplar y Subir
             composite_img = None
             clean_layers = []
             
@@ -162,14 +317,19 @@ try:
                 alfa_np[alfa_np < 20] = 0
                 alfa_limpio = Image.fromarray(alfa_np)
                 clean_layer = Image.merge("RGBA", (r, g, b, alfa_limpio))
-                clean_layers.append(clean_layer)
+                
+                # --- NUEVO PASO: Súper Resolución 4K Individual con Real-CUGAN ---
+                # Aumentamos la resolución ANTES del acoplado final
+                upscaled_layer = ai_upscale_layer(clean_layer, scale=4)
+                
+                clean_layers.append(upscaled_layer)
                 
                 # Ignoramos la capa 0 para el composite (fondo de Qwen)
                 if i > 0:
                     if composite_img is None:
-                        composite_img = clean_layer.copy()
+                        composite_img = upscaled_layer.copy()
                     else:
-                        composite_img.alpha_composite(clean_layer)
+                        composite_img.alpha_composite(upscaled_layer)
 
             # Fallback en caso de que solo haya capa 0
             if composite_img is None:
