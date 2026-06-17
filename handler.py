@@ -87,6 +87,14 @@ try:
         print("✅ Real-CUGAN (models-se) instalado exitosamente.")
 
     # ==========================================================
+    # DEPENDENCIAS DEL SISTEMA (LIBRERÍAS C++ DE VULKAN)
+    # ==========================================================
+    if not os.path.exists("/usr/lib/x86_64-linux-gnu/libvulkan.so.1"):
+        print("⚡ Instalando libvulkan1 (Dependencia crítica para CUGAN en RunPod)...")
+        subprocess.run(["apt-get", "update"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["apt-get", "install", "-y", "libvulkan1"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # ==========================================================
     # PRE-FLIGHT CHECK DE VULKAN (PREVENCIÓN DE CAÍDAS)
     # ==========================================================
     print("🛡️ Ejecutando diagnóstico de seguridad de Vulkan GPU...")
