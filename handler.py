@@ -6,6 +6,7 @@ try:
     import io
     import os
     import numpy as np
+    import zipfile
     
     # ¡CRÍTICO! Forzar la ruta del caché ANTES de importar cualquier inteligencia artificial
     # Si esto se pone después, Python lo ignora y descarga en el disco temporal de 5GB.
@@ -72,7 +73,12 @@ try:
         os.makedirs(CUGAN_BIN_DIR, exist_ok=True)
         # Descargamos la versión oficial de Ubuntu desde GitHub
         subprocess.run(["wget", "https://github.com/nihui/realcugan-ncnn-vulkan/releases/download/20220728/realcugan-ncnn-vulkan-20220728-ubuntu.zip", "-O", "/tmp/cugan.zip"], check=True)
-        subprocess.run(["unzip", "-o", "/tmp/cugan.zip", "-d", "/tmp/"], check=True)
+        
+        # Descomprimimos usando Python Nativo (evita errores de 'unzip' no instalado en RunPod)
+        print("Descomprimiendo archivo ZIP de CUGAN...")
+        with zipfile.ZipFile("/tmp/cugan.zip", 'r') as zip_ref:
+            zip_ref.extractall("/tmp/")
+            
         # Movemos los archivos al disco de red persistente
         subprocess.run(["mv", "/tmp/realcugan-ncnn-vulkan-20220728-ubuntu/realcugan-ncnn-vulkan", CUGAN_EXE], check=True)
         subprocess.run(["mv", "/tmp/realcugan-ncnn-vulkan-20220728-ubuntu/models-se", os.path.join(CUGAN_BIN_DIR, "models-se")], check=True)
