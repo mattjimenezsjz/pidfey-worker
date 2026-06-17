@@ -212,65 +212,6 @@ try:
         s3_client.upload_fileobj(buffer, R2_BUCKET_NAME, file_key, ExtraArgs={"ContentType": "image/png"})
         return f"{R2_PUBLIC_DOMAIN}/{file_key}"
 
-    def upscale_with_esrgan(img: Image.Image, session) -> Image.Image:
-        if session is None:
-            return img
-            
-        print("Ejecutando Real-ESRGAN x4 en la imagen base...")
-        img_np = np.array(img.convert("RGB")).astype(np.float32) / 255.0
-        img_np = np.transpose(img_np, (2, 0, 1))
-        img_np = np.expand_dims(img_np, axis=0)
-        
-        ort_inputs = {session.get_inputs()[0].name: img_np}
-        ort_outs = session.run(None, ort_inputs)
-        
-        output_np = ort_outs[0][0]
-        output_np = np.clip(output_np, 0.0, 1.0)
-        output_np = np.transpose(output_np, (1, 2, 0))
-        output_np = (output_np * 255.0).round().astype(np.uint8)
-        
-        upscaled_img = Image.fromarray(output_np, "RGB")
-        
-        if "A" in img.getbands():
-            alpha = img.split()[-1]
-            target_size = upscaled_img.size
-            alpha_upscaled = alpha.resize(target_size, Image.Resampling.BICUBIC)
-            alpha_np = np.array(alpha_upscaled)
-            alpha_np[alpha_np < 128] = 0
-            alpha_np[alpha_np >= 128] = 255
-            alpha_upscaled = Image.fromarray(alpha_np)
-            upscaled_img.putalpha(alpha_upscaled)
-            
-        return upscaled_img
-
-    def process_and_upload_layer(layer_img: Image.Image, name_suffix: str, job_id: str, max_width_cm: int, max_height_cm: int, dpi: int):
-        # 1. Calcular escalado proporcional inteligente (Aspect Ratio)
-        orig_w, orig_h = layer_img.size
-        # Tamaño máximo en píxeles
-        max_target_w_px = int((max_width_cm / 2.54) * dpi)
-        max_target_h_px = int((max_height_cm / 2.54) * dpi)
-        
-        # Calcular proporciones
-        ratio_w = max_target_w_px / orig_w
-        ratio_h = max_target_h_px / orig_h
-        ratio = min(ratio_w, ratio_h) # Usamos el mínimo para que encaje sin salirse
-        
-        target_w = int(orig_w * ratio)
-        target_h = int(orig_h * ratio)
-        
-        # 2. Redimensionar usando LANCZOS manteniendo proporción
-        resized_img = layer_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
-        
-        # 3. Guardar con metadata DPI
-        buffer = io.BytesIO()
-        resized_img.save(buffer, format="PNG", dpi=(dpi, dpi))
-        buffer.seek(0)
-        
-        # 4. Subir a R2
-        file_key = f"jobs/{job_id}/{name_suffix}.png"
-        s3_client.upload_fileobj(buffer, R2_BUCKET_NAME, file_key, ExtraArgs={"ContentType": "image/png"})
-        return f"{R2_PUBLIC_DOMAIN}/{file_key}"
-
     def handler(job):
         job_input = job['input']
         job_id = job['id']
@@ -296,14 +237,11 @@ try:
             response = requests.get(image_url)
             input_image = Image.open(io.BytesIO(response.content)).convert("RGBA") # Directo a RGBA
             
-            # 1. ENGORDAR LA IMAGEN BASE CON REAL-ESRGAN (El Músculo primero)
-            upscaled_input = upscale_with_esrgan(input_image, esrgan_session)
-            
             # Inferencia Tubería Dual en la H100
             with torch.inference_mode():
                 # Extraer capas con Qwen (El Cirujano en Alta Resolución)
                 qwen_inputs = {
-                    "image": upscaled_input,
+                    "image": input_image,
                     "generator": torch.Generator(device='cuda').manual_seed(777),
                     "num_inference_steps": 30,
                     "layers": 4, 
