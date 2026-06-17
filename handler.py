@@ -243,13 +243,19 @@ try:
         try:
             # Descargar imagen base
             response = requests.get(image_url)
-            input_image = Image.open(io.BytesIO(response.content)).convert("RGBA") # Directo a RGBA
+            # IMPORTANTE: Convertimos a RGB plano para que CUGAN no choque con canales Alfa y genere bordes verdes
+            input_image_rgb = Image.open(io.BytesIO(response.content)).convert("RGB") 
+            
+            # 1. ENGORDAR LA IMAGEN BASE CON REAL-CUGAN (El Músculo primero)
+            # Esto evita los bordes verdes, porque segmentaremos la imagen ya estando en 4K.
+            print(f"Job {job_id}: Aplicando Real-CUGAN a la imagen base plana...")
+            upscaled_input = ai_upscale_layer(input_image_rgb, scale=4)
             
             # Inferencia Tubería Dual en la H100
             with torch.inference_mode():
                 # Extraer capas con Qwen (El Cirujano en Alta Resolución)
                 qwen_inputs = {
-                    "image": input_image,
+                    "image": upscaled_input,
                     "generator": torch.Generator(device='cuda').manual_seed(777),
                     "num_inference_steps": 30,
                     "layers": 4, 
@@ -270,18 +276,14 @@ try:
                 alfa_limpio = Image.fromarray(alfa_np)
                 clean_layer = Image.merge("RGBA", (r, g, b, alfa_limpio))
                 
-                # --- NUEVO PASO: Súper Resolución 4K Individual con Real-CUGAN ---
-                # Aumentamos la resolución ANTES del acoplado final
-                upscaled_layer = ai_upscale_layer(clean_layer, scale=4)
-                
-                clean_layers.append(upscaled_layer)
+                clean_layers.append(clean_layer)
                 
                 # Ignoramos la capa 0 para el composite (fondo de Qwen)
                 if i > 0:
                     if composite_img is None:
-                        composite_img = upscaled_layer.copy()
+                        composite_img = clean_layer.copy()
                     else:
-                        composite_img.alpha_composite(upscaled_layer)
+                        composite_img.alpha_composite(clean_layer)
 
             # Fallback en caso de que solo haya capa 0
             if composite_img is None:
