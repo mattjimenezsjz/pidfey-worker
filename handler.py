@@ -85,12 +85,12 @@ try:
         region_name="auto",
     )
 
-    def process_and_upload_layer(layer_img: Image.Image, name_suffix: str, job_id: str, max_width_cm: int, max_height_cm: int, dpi: int):
+    def process_and_upload_layer(layer_img: Image.Image, name_suffix: str, job_id: str, max_width_cm: int, max_height_cm: int):
         # 1. Calcular escalado proporcional inteligente (Aspect Ratio)
         orig_w, orig_h = layer_img.size
-        # Tamaño máximo en píxeles
-        max_target_w_px = int((max_width_cm / 2.54) * dpi)
-        max_target_h_px = int((max_height_cm / 2.54) * dpi)
+        # Tamaño máximo en píxeles (cálculo interno con densidad 300)
+        max_target_w_px = int((max_width_cm / 2.54) * 300)
+        max_target_h_px = int((max_height_cm / 2.54) * 300)
         
         # Calcular proporciones
         ratio_w = max_target_w_px / orig_w
@@ -103,9 +103,9 @@ try:
         # 2. Redimensionar usando LANCZOS manteniendo proporción
         resized_img = layer_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
         
-        # 3. Guardar con metadata DPI
+        # 3. Guardar SIN metadata DPI para evitar borrosidad en los RIP DTF
         buffer = io.BytesIO()
-        resized_img.save(buffer, format="PNG", dpi=(dpi, dpi))
+        resized_img.save(buffer, format="PNG")
         buffer.seek(0)
         
         # 4. Subir a R2
@@ -122,7 +122,6 @@ try:
         image_url = job_input.get('image_url')
         print_width_cm = int(job_input.get('print_width_cm', 28))
         print_height_cm = int(job_input.get('print_height_cm', 28))
-        print_dpi = int(job_input.get('print_dpi', 300))
         strength = float(job_input.get('strength', 0.75)) # Qué tanto cambiar la imagen original
         
         if not pipeline_qwen:
@@ -131,7 +130,7 @@ try:
         if not image_url:
             return {"error": "Se requiere una image_url base para la transformación Img2Img."}
 
-        print(f"Job {job_id}: Procesando a {print_width_cm}x{print_height_cm}cm ({print_dpi} DPI)")
+        print(f"Job {job_id}: Procesando a {print_width_cm}x{print_height_cm}cm")
 
         try:
             # Descargar imagen base
@@ -178,11 +177,11 @@ try:
             layer_urls = []
             
             # Subir el composite (Acoplado)
-            composite_url = process_and_upload_layer(composite_img, "final_composite_300dpi", job_id, print_width_cm, print_height_cm, print_dpi)
+            composite_url = process_and_upload_layer(composite_img, "final_composite", job_id, print_width_cm, print_height_cm)
             
             # Subir capas segmentadas individuales
             for i, c_layer in enumerate(clean_layers):
-                url = process_and_upload_layer(c_layer, f"layer_{i}", job_id, print_width_cm, print_height_cm, print_dpi)
+                url = process_and_upload_layer(c_layer, f"layer_{i}", job_id, print_width_cm, print_height_cm)
                 layer_urls.append({"name": f"layer_{i}.png", "url": url})
                 
             return {
