@@ -86,26 +86,9 @@ try:
     )
 
     def process_and_upload_layer(layer_img: Image.Image, name_suffix: str, job_id: str, max_width_cm: int, max_height_cm: int):
-        # 1. Calcular escalado proporcional inteligente (Aspect Ratio)
-        orig_w, orig_h = layer_img.size
-        # Tamaño máximo en píxeles (cálculo interno con densidad 300)
-        max_target_w_px = int((max_width_cm / 2.54) * 300)
-        max_target_h_px = int((max_height_cm / 2.54) * 300)
-        
-        # Calcular proporciones
-        ratio_w = max_target_w_px / orig_w
-        ratio_h = max_target_h_px / orig_h
-        ratio = min(ratio_w, ratio_h) # Usamos el mínimo para que encaje sin salirse
-        
-        target_w = int(orig_w * ratio)
-        target_h = int(orig_h * ratio)
-        
-        # 2. Redimensionar usando LANCZOS manteniendo proporción
-        resized_img = layer_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
-        
-        # 3. Guardar SIN metadata DPI para evitar borrosidad en los RIP DTF
+        # 1. Guardar la imagen en su resolución original nativa 2K sin interpolación
         buffer = io.BytesIO()
-        resized_img.save(buffer, format="PNG")
+        layer_img.save(buffer, format="PNG")
         buffer.seek(0)
         
         # 4. Subir a R2
