@@ -125,14 +125,9 @@ try:
                 # Extraer capas con Qwen (El Cirujano)
                 qwen_inputs = {
                     "image": input_image,
-                    "resolution": 1024,
                     "generator": torch.Generator(device='cuda').manual_seed(777),
-                    "num_inference_steps": 40,
+                    "num_inference_steps": 30,
                     "layers": 4, 
-                    "true_cfg_scale": 4.5,      # Sube a 4.5 si los bordes de las capas no se separan bien
-                    "cfg_normalize": True,      # Protege tus colores a alta resolución
-                    "use_en_prompt": True,      # Obligatorio para que la IA entienda el contexto de la imagen
-                    "negative_prompt": " ",
                 }
                 qwen_output = pipeline_qwen(**qwen_inputs)
                 output_image_layers = qwen_output.images[0]
