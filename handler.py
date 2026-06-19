@@ -163,11 +163,12 @@ try:
             # 3. Cargar la imagen 2K al sistema para Qwen
             input_image = Image.open(output_tmp).convert("RGBA")
             
-            # 4. Inferencia Tubería Dual en la H100 (El Cirujano en 4K)
+            # 4. Inferencia Tubería Dual en la H100 (El Cirujano en 2K)
             with torch.inference_mode():
                 # Extraer capas con Qwen (El Cirujano)
                 qwen_inputs = {
                     "image": input_image,
+                    "resolution": 2048,
                     "generator": torch.Generator(device='cuda').manual_seed(777),
                     "num_inference_steps": 30,
                     "layers": 4, 
