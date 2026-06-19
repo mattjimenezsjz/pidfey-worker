@@ -96,6 +96,26 @@ try:
         s3_client.upload_fileobj(buffer, R2_BUCKET_NAME, file_key, ExtraArgs={"ContentType": "image/png"})
         return f"{R2_PUBLIC_DOMAIN}/{file_key}"
 
+    def run_real_cugan_x4(input_path, output_path):
+        cugan_bin = "/workspace/bin/cugan/realcugan-ncnn-vulkan"
+        models_dir = "/workspace/bin/cugan/models-se"
+        
+        cmd = [
+            cugan_bin, 
+            "-i", input_path, 
+            "-o", output_path, 
+            "-s", "4",
+            "-m", models_dir,
+            "-n", "0", 
+            "-t", "400",
+            "-j", "1:1:1"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"Error CUGAN: {result.stderr}")
+            raise Exception("Fallo en el upscaler x4 de Real-CUGAN.")
+        return output_path
+
     def handler(job):
         job_input = job['input']
         job_id = job['id']
@@ -115,12 +135,23 @@ try:
 
         print(f"Job {job_id}: Procesando a {print_width_cm}x{print_height_cm}cm")
 
+        input_tmp = "/tmp/input_1k.png"
+        output_tmp = "/tmp/output_4k.png"
+        
         try:
-            # Descargar imagen base
+            # 1. Descargar imagen base 1K a disco
             response = requests.get(image_url)
-            input_image = Image.open(io.BytesIO(response.content)).convert("RGBA") # Directo a RGBA
+            with open(input_tmp, "wb") as f:
+                f.write(response.content)
             
-            # Inferencia Tubería Dual en la H100
+            # 2. UPSCALER x4 (Real-CUGAN)
+            print("Ejecutando Real-CUGAN x4...")
+            run_real_cugan_x4(input_tmp, output_tmp)
+            
+            # 3. Cargar la imagen 4K al sistema para Qwen
+            input_image = Image.open(output_tmp).convert("RGBA")
+            
+            # 4. Inferencia Tubería Dual en la H100 (El Cirujano en 4K)
             with torch.inference_mode():
                 # Extraer capas con Qwen (El Cirujano)
                 qwen_inputs = {
@@ -167,6 +198,10 @@ try:
                 url = process_and_upload_layer(c_layer, f"layer_{i}", job_id, print_width_cm, print_height_cm)
                 layer_urls.append({"name": f"layer_{i}.png", "url": url})
                 
+            # Limpieza del Recolector de Basura (Éxito)
+            if os.path.exists(input_tmp): os.remove(input_tmp)
+            if os.path.exists(output_tmp): os.remove(output_tmp)
+            
             return {
                 "success": True,
                 "message": "Extracción y Acoplado completado exitosamente.",
@@ -175,6 +210,9 @@ try:
             }
             
         except Exception as e:
+            # Limpieza del Recolector de Basura (Fallo)
+            if os.path.exists(input_tmp): os.remove(input_tmp)
+            if os.path.exists(output_tmp): os.remove(output_tmp)
             return {"error": str(e), "traceback": traceback.format_exc()}
 
     # Iniciar el Worker
