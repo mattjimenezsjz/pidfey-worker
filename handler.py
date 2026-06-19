@@ -103,7 +103,7 @@ try:
         s3_client.upload_fileobj(buffer, R2_BUCKET_NAME, file_key, ExtraArgs={"ContentType": "image/png"})
         return f"{R2_PUBLIC_DOMAIN}/{file_key}"
 
-    def run_real_cugan_x4(input_path, output_path):
+    def run_real_cugan_x2(input_path, output_path):
         # En RunPod Serverless, el disco de red se monta en /runpod-volume (en la terminal es /workspace)
         cugan_bin = "/runpod-volume/bin/cugan/realcugan-ncnn-vulkan"
         models_dir = "/runpod-volume/bin/cugan/models-se"
@@ -116,7 +116,7 @@ try:
             cugan_bin, 
             "-i", input_path, 
             "-o", output_path, 
-            "-s", "4",
+            "-s", "2",  # <-- CAMBIO A x2 (Escalado a 2K)
             "-m", models_dir,
             "-n", "0", 
             "-t", "400",
@@ -125,7 +125,7 @@ try:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"Error CUGAN: {result.stderr}")
-            raise Exception("Fallo en el upscaler x4 de Real-CUGAN.")
+            raise Exception("Fallo en el upscaler x2 de Real-CUGAN.")
         return output_path
 
     def handler(job):
@@ -148,7 +148,7 @@ try:
         print(f"Job {job_id}: Procesando a {print_width_cm}x{print_height_cm}cm")
 
         input_tmp = "/tmp/input_1k.png"
-        output_tmp = "/tmp/output_4k.png"
+        output_tmp = "/tmp/output_2k.png"
         
         try:
             # 1. Descargar imagen base 1K a disco
@@ -156,11 +156,11 @@ try:
             with open(input_tmp, "wb") as f:
                 f.write(response.content)
             
-            # 2. UPSCALER x4 (Real-CUGAN)
-            print("Ejecutando Real-CUGAN x4...")
-            run_real_cugan_x4(input_tmp, output_tmp)
+            # 2. UPSCALER x2 (Real-CUGAN) -> Lleva la imagen de 1K a 2K
+            print("Ejecutando Real-CUGAN x2...")
+            run_real_cugan_x2(input_tmp, output_tmp)
             
-            # 3. Cargar la imagen 4K al sistema para Qwen
+            # 3. Cargar la imagen 2K al sistema para Qwen
             input_image = Image.open(output_tmp).convert("RGBA")
             
             # 4. Inferencia Tubería Dual en la H100 (El Cirujano en 4K)
