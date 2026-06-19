@@ -6,17 +6,10 @@ try:
     import io
     import os
     import numpy as np
-    import subprocess
     
     # ¡CRÍTICO! Forzar la ruta del caché ANTES de importar cualquier inteligencia artificial
     # Si esto se pone después, Python lo ignora y descarga en el disco temporal de 5GB.
     os.environ["HF_HOME"] = "/runpod-volume/models/huggingface"
-    
-    # --- PRE-FLIGHT CHECK: Instalar Vulkan en caliente ---
-    print("Instalando dependencias de Vulkan por hardware...")
-    subprocess.run(["apt-get", "update"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["apt-get", "install", "-y", "libvulkan1"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print("Vulkan listo.")
     
     import boto3
     import shutil
@@ -103,31 +96,6 @@ try:
         s3_client.upload_fileobj(buffer, R2_BUCKET_NAME, file_key, ExtraArgs={"ContentType": "image/png"})
         return f"{R2_PUBLIC_DOMAIN}/{file_key}"
 
-    def run_real_cugan_x2(input_path, output_path):
-        # En RunPod Serverless, el disco de red se monta en /runpod-volume (en la terminal es /workspace)
-        cugan_bin = "/runpod-volume/bin/cugan/realcugan-ncnn-vulkan"
-        models_dir = "/runpod-volume/bin/cugan/models-se"
-        
-        # Otorga permisos de ejecución por si acaso (equivalente a chmod +x)
-        if os.path.exists(cugan_bin):
-            os.chmod(cugan_bin, 0o755)
-            
-        cmd = [
-            cugan_bin, 
-            "-i", input_path, 
-            "-o", output_path, 
-            "-s", "2",  # <-- CAMBIO A x2 (Escalado a 2K)
-            "-m", models_dir,
-            "-n", "0", 
-            "-t", "400",
-            "-j", "1:1:1"
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"Error CUGAN: {result.stderr}")
-            raise Exception("Fallo en el upscaler x2 de Real-CUGAN.")
-        return output_path
-
     def handler(job):
         job_input = job['input']
         job_id = job['id']
@@ -147,28 +115,17 @@ try:
 
         print(f"Job {job_id}: Procesando a {print_width_cm}x{print_height_cm}cm")
 
-        input_tmp = "/tmp/input_1k.png"
-        output_tmp = "/tmp/output_2k.png"
-        
         try:
-            # 1. Descargar imagen base 1K a disco
+            # Descargar imagen base
             response = requests.get(image_url)
-            with open(input_tmp, "wb") as f:
-                f.write(response.content)
+            input_image = Image.open(io.BytesIO(response.content)).convert("RGBA") # Directo a RGBA
             
-            # 2. UPSCALER x2 (Real-CUGAN) -> Lleva la imagen de 1K a 2K
-            print("Ejecutando Real-CUGAN x2...")
-            run_real_cugan_x2(input_tmp, output_tmp)
-            
-            # 3. Cargar la imagen 2K al sistema para Qwen
-            input_image = Image.open(output_tmp).convert("RGBA")
-            
-            # 4. Inferencia Tubería Dual en la H100 (El Cirujano en 2K)
+            # Inferencia Tubería Dual en la H100
             with torch.inference_mode():
                 # Extraer capas con Qwen (El Cirujano)
                 qwen_inputs = {
                     "image": input_image,
-                    "resolution": 2048,
+                    "resolution": 1024,
                     "generator": torch.Generator(device='cuda').manual_seed(777),
                     "num_inference_steps": 30,
                     "layers": 4, 
@@ -211,10 +168,6 @@ try:
                 url = process_and_upload_layer(c_layer, f"layer_{i}", job_id, print_width_cm, print_height_cm)
                 layer_urls.append({"name": f"layer_{i}.png", "url": url})
                 
-            # Limpieza del Recolector de Basura (Éxito)
-            if os.path.exists(input_tmp): os.remove(input_tmp)
-            if os.path.exists(output_tmp): os.remove(output_tmp)
-            
             return {
                 "success": True,
                 "message": "Extracción y Acoplado completado exitosamente.",
@@ -223,9 +176,6 @@ try:
             }
             
         except Exception as e:
-            # Limpieza del Recolector de Basura (Fallo)
-            if os.path.exists(input_tmp): os.remove(input_tmp)
-            if os.path.exists(output_tmp): os.remove(output_tmp)
             return {"error": str(e), "traceback": traceback.format_exc()}
 
     # Iniciar el Worker
