@@ -6,6 +6,7 @@ try:
     import io
     import os
     import numpy as np
+    import subprocess
     
     # ¡CRÍTICO! Forzar la ruta del caché ANTES de importar cualquier inteligencia artificial
     # Si esto se pone después, Python lo ignora y descarga en el disco temporal de 5GB.
