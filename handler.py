@@ -97,9 +97,14 @@ try:
         return f"{R2_PUBLIC_DOMAIN}/{file_key}"
 
     def run_real_cugan_x4(input_path, output_path):
-        cugan_bin = "/workspace/bin/cugan/realcugan-ncnn-vulkan"
-        models_dir = "/workspace/bin/cugan/models-se"
+        # En RunPod Serverless, el disco de red se monta en /runpod-volume (en la terminal es /workspace)
+        cugan_bin = "/runpod-volume/bin/cugan/realcugan-ncnn-vulkan"
+        models_dir = "/runpod-volume/bin/cugan/models-se"
         
+        # Otorga permisos de ejecución por si acaso (equivalente a chmod +x)
+        if os.path.exists(cugan_bin):
+            os.chmod(cugan_bin, 0o755)
+            
         cmd = [
             cugan_bin, 
             "-i", input_path, 
