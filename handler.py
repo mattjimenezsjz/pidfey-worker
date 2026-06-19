@@ -11,6 +11,12 @@ try:
     # Si esto se pone después, Python lo ignora y descarga en el disco temporal de 5GB.
     os.environ["HF_HOME"] = "/runpod-volume/models/huggingface"
     
+    # --- PRE-FLIGHT CHECK: Instalar Vulkan en caliente ---
+    print("Instalando dependencias de Vulkan por hardware...")
+    subprocess.run(["apt-get", "update"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["apt-get", "install", "-y", "libvulkan1"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print("Vulkan listo.")
+    
     import boto3
     import shutil
     import requests
