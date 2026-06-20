@@ -7,6 +7,7 @@ try:
     import os
     import numpy as np
     import subprocess
+    import concurrent.futures
     
     # ¡CRÍTICO! Forzar la ruta del caché ANTES de importar cualquier inteligencia artificial
     # Si esto se pone después, Python lo ignora y descarga en el disco temporal de 5GB.
@@ -15,8 +16,27 @@ try:
     # --- PRE-FLIGHT CHECK: Instalar Vulkan en caliente ---
     print("Instalando dependencias de Vulkan por hardware...")
     subprocess.run(["apt-get", "update"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["apt-get", "install", "-y", "libvulkan1"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print("Vulkan listo.")
+    subprocess.run(["apt-get", "install", "-y", "libvulkan1", "vulkan-tools"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    # Inyectar el driver de la H100 (NVIDIA ICD) para evitar el emulador llvmpipe
+    icd_dir = "/etc/vulkan/icd.d"
+    os.makedirs(icd_dir, exist_ok=True)
+    icd_path = os.path.join(icd_dir, "nvidia_icd.json")
+    if not os.path.exists(icd_path):
+        import json
+        nvidia_icd = {
+            "file_format_version": "1.0.0",
+            "ICD": {
+                "library_path": "libGLX_nvidia.so.0",
+                "api_version": "1.3.0"
+            }
+        }
+        with open(icd_path, "w") as f:
+            json.dump(nvidia_icd, f)
+            
+    # Forzar a Vulkan a usar solo este driver
+    os.environ["VK_ICD_FILENAMES"] = icd_path
+    print("Vulkan puenteado a NVIDIA H100 exitosamente.")
     
     import boto3
     import shutil
@@ -241,16 +261,30 @@ try:
                 qwen_output = pipeline_qwen(**qwen_inputs)
                 output_image_layers = qwen_output.images[0]
 
-            # 3. Procesamiento y Escalado Matemático x3
-            composite_img = None
-            clean_layers = []
+            # 3. Procesamiento y Escalado Matemático x4 (Multihilo)
+            print("Lanzando procesos de Real-CUGAN en paralelo (Multihilo)...")
+            clean_layers = [None] * len(output_image_layers)
             layer_urls = []
             
-            for i, layer_img in enumerate(output_image_layers):
-                print(f"Aplicando Método de Dos Fondos a la capa {i}...")
-                upscaled_layer = process_layer_with_math(layer_img, job_id, f"layer_{i}")
-                clean_layers.append(upscaled_layer)
-                
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(output_image_layers)) as executor:
+                futuros = {}
+                for i, layer_img in enumerate(output_image_layers):
+                    futuro = executor.submit(process_layer_with_math, layer_img, job_id, f"layer_{i}")
+                    futuros[futuro] = i
+                    
+                for futuro in concurrent.futures.as_completed(futuros):
+                    indice = futuros[futuro]
+                    try:
+                        clean_layers[indice] = futuro.result()
+                        print(f"Capa {indice} procesada exitosamente con CUGAN.")
+                    except Exception as e:
+                        print(f"Error procesando la capa {indice}: {e}")
+                        raise e
+                        
+            # Ensamblamos el composite respetando el orden de las capas
+            composite_img = None
+            for i, upscaled_layer in enumerate(clean_layers):
+                if upscaled_layer is None: continue
                 # Ignoramos la capa 0 (fondo) para el composite final
                 if i > 0:
                     if composite_img is None:
@@ -259,7 +293,7 @@ try:
                         composite_img.alpha_composite(upscaled_layer)
 
             # Fallback
-            if composite_img is None:
+            if composite_img is None and len(clean_layers) > 0:
                 composite_img = clean_layers[0]
             
             # 4. Subir a R2 (Todo ya está escalado y limpio)
