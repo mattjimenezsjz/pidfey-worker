@@ -107,7 +107,7 @@ try:
         # En RunPod Serverless, el disco de red se monta en /runpod-volume
         cugan_dir = "/runpod-volume/bin/cugan"
         cugan_bin = os.path.join(cugan_dir, "realcugan-ncnn-vulkan")
-        models_dir = "models-pro"  # Debe ser relativo por un bug de CUGAN
+        models_dir = "models-se"  # Debe ser relativo por un bug de CUGAN
         
         # Otorga permisos de ejecución por si acaso
         if os.path.exists(cugan_bin):
@@ -117,7 +117,7 @@ try:
             cugan_bin, 
             "-i", input_path, 
             "-o", output_path, 
-            "-s", "3",
+            "-s", "4",
             "-m", models_dir,
             "-n", "0", 
             "-t", "400",
