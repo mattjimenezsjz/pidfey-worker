@@ -115,7 +115,7 @@ try:
     def process_and_upload_layer(layer_img: Image.Image, name_suffix: str, job_id: str, max_width_cm: int, max_height_cm: int):
         # 1. Guardar la imagen en su resolución original nativa 2K sin interpolación
         buffer = io.BytesIO()
-        layer_img.save(buffer, format="PNG")
+        layer_img.save(buffer, format="PNG", compress_level=1)
         buffer.seek(0)
         
         # 4. Subir a R2
@@ -170,16 +170,16 @@ try:
         img_sobre_negro = rgb * alfa_3d
         img_sobre_blanco = (rgb * alfa_3d) + (255.0 * (1.0 - alfa_3d))
         
-        # Rutas temporales
-        temp_black_in = f"/tmp/{job_id}_{suffix}_black_in.png"
-        temp_black_out = f"/tmp/{job_id}_{suffix}_black_out.png"
-        temp_white_in = f"/tmp/{job_id}_{suffix}_white_in.png"
-        temp_white_out = f"/tmp/{job_id}_{suffix}_white_out.png"
+        # Rutas temporales (RAM Disk ultra rápido)
+        temp_black_in = f"/dev/shm/{job_id}_{suffix}_black_in.png"
+        temp_black_out = f"/dev/shm/{job_id}_{suffix}_black_out.png"
+        temp_white_in = f"/dev/shm/{job_id}_{suffix}_white_in.png"
+        temp_white_out = f"/dev/shm/{job_id}_{suffix}_white_out.png"
         
         try:
-            # Guardamos temporales en disco
-            Image.fromarray(np.clip(img_sobre_negro, 0, 255).astype(np.uint8)).save(temp_black_in)
-            Image.fromarray(np.clip(img_sobre_blanco, 0, 255).astype(np.uint8)).save(temp_white_in)
+            # Guardamos temporales en disco RAM (con mínima compresión para salvar CPU)
+            Image.fromarray(np.clip(img_sobre_negro, 0, 255).astype(np.uint8)).save(temp_black_in, compress_level=1)
+            Image.fromarray(np.clip(img_sobre_blanco, 0, 255).astype(np.uint8)).save(temp_white_in, compress_level=1)
             
             # 2. UPSCALE CON IA x3 (models-pro)
             ejecutar_realcugan_obediente(temp_black_in, temp_black_out)
@@ -296,16 +296,45 @@ try:
             if composite_img is None and len(clean_layers) > 0:
                 composite_img = clean_layers[0]
             
-            # 4. Subir a R2 (Todo ya está escalado y limpio)
-            composite_url = process_and_upload_layer(composite_img, "final_composite", job_id, print_width_cm, print_height_cm)
+            # 4. Subir a R2 en Paralelo (Multihilo)
+            print("Iniciando subidas simultáneas a Cloudflare R2...")
             
+            # Preparamos las tareas de subida
+            upload_tasks = []
+            
+            # Tarea para el composite
+            upload_tasks.append(
+                ("final_composite", composite_img)
+            )
+            
+            # Tareas para las capas individuales
             for i, c_layer in enumerate(clean_layers):
-                url = process_and_upload_layer(c_layer, f"layer_{i}", job_id, print_width_cm, print_height_cm)
-                layer_urls.append({"name": f"layer_{i}.png", "url": url})
+                if c_layer is not None:
+                    upload_tasks.append((f"layer_{i}", c_layer))
+                    
+            # Ejecutamos las subidas en paralelo
+            upload_results = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(upload_tasks)) as executor:
+                futuros_upload = {
+                    executor.submit(process_and_upload_layer, task_img, task_name, job_id, print_width_cm, print_height_cm): task_name
+                    for task_name, task_img in upload_tasks
+                }
+                for futuro in concurrent.futures.as_completed(futuros_upload):
+                    t_name = futuros_upload[futuro]
+                    try:
+                        upload_results[t_name] = futuro.result()
+                    except Exception as e:
+                        print(f"Error subiendo {t_name} a R2: {e}")
+                        
+            composite_url = upload_results.get("final_composite", "")
+            for i in range(len(clean_layers)):
+                name = f"layer_{i}"
+                if name in upload_results:
+                    layer_urls.append({"name": f"{name}.png", "url": upload_results[name]})
                 
             return {
                 "success": True,
-                "message": "Extracción Nativa y Escalado Matemático completados.",
+                "message": "Extracción Nativa, Escalado CUGAN y Subida Paralela completados.",
                 "composite_url": composite_url,
                 "layers": layer_urls
             }
