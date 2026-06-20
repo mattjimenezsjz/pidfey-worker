@@ -105,8 +105,9 @@ try:
 
     def ejecutar_realcugan_obediente(input_path, output_path):
         # En RunPod Serverless, el disco de red se monta en /runpod-volume
-        cugan_bin = "/runpod-volume/bin/cugan/realcugan-ncnn-vulkan"
-        models_dir = "/runpod-volume/bin/cugan/models-pro"
+        cugan_dir = "/runpod-volume/bin/cugan"
+        cugan_bin = os.path.join(cugan_dir, "realcugan-ncnn-vulkan")
+        models_dir = "models-pro"  # Debe ser relativo por un bug de CUGAN
         
         # Otorga permisos de ejecución por si acaso
         if os.path.exists(cugan_bin):
@@ -122,7 +123,7 @@ try:
             "-t", "400",
             "-j", "1:1:1"
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=cugan_dir)
         if result.returncode != 0:
             print(f"Error CUGAN: {result.stderr}")
             raise Exception("Fallo en el upscaler de Real-CUGAN.")
