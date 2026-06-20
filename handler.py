@@ -6,10 +6,17 @@ try:
     import io
     import os
     import numpy as np
+    import subprocess
     
     # ¡CRÍTICO! Forzar la ruta del caché ANTES de importar cualquier inteligencia artificial
     # Si esto se pone después, Python lo ignora y descarga en el disco temporal de 5GB.
     os.environ["HF_HOME"] = "/runpod-volume/models/huggingface"
+    
+    # --- PRE-FLIGHT CHECK: Instalar Vulkan en caliente ---
+    print("Instalando dependencias de Vulkan por hardware...")
+    subprocess.run(["apt-get", "update"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["apt-get", "install", "-y", "libvulkan1"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print("Vulkan listo.")
     
     import boto3
     import shutil
@@ -96,16 +103,118 @@ try:
         s3_client.upload_fileobj(buffer, R2_BUCKET_NAME, file_key, ExtraArgs={"ContentType": "image/png"})
         return f"{R2_PUBLIC_DOMAIN}/{file_key}"
 
+    def ejecutar_realcugan_obediente(input_path, output_path):
+        # En RunPod Serverless, el disco de red se monta en /runpod-volume
+        cugan_bin = "/runpod-volume/bin/cugan/realcugan-ncnn-vulkan"
+        models_dir = "/runpod-volume/bin/cugan/models-pro"
+        
+        # Otorga permisos de ejecución por si acaso
+        if os.path.exists(cugan_bin):
+            os.chmod(cugan_bin, 0o755)
+            
+        cmd = [
+            cugan_bin, 
+            "-i", input_path, 
+            "-o", output_path, 
+            "-s", "3",
+            "-m", models_dir,
+            "-n", "0", 
+            "-t", "400",
+            "-j", "1:1:1"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"Error CUGAN: {result.stderr}")
+            raise Exception("Fallo en el upscaler de Real-CUGAN.")
+        return output_path
+
+    def process_layer_with_math(layer_img: Image.Image, job_id: str, suffix: str):
+        # Aseguramos RGBA y pasamos a numpy float32
+        layer_img = layer_img.convert("RGBA")
+        img_np = np.array(layer_img).astype(np.float32)
+        
+        r = img_np[:, :, 0]
+        g = img_np[:, :, 1]
+        b = img_np[:, :, 2]
+        a = img_np[:, :, 3]
+        
+        # Limpiar polvo: Alpha < 20 = 0
+        a[a < 20] = 0
+        
+        rgb = np.stack([r, g, b], axis=-1)
+        alfa_norm = a / 255.0
+        alfa_3d = alfa_norm[..., None]
+        
+        # 1. Crear las dos imágenes base (Fondo Negro y Fondo Blanco)
+        img_sobre_negro = rgb * alfa_3d
+        img_sobre_blanco = (rgb * alfa_3d) + (255.0 * (1.0 - alfa_3d))
+        
+        # Rutas temporales
+        temp_black_in = f"/tmp/{job_id}_{suffix}_black_in.png"
+        temp_black_out = f"/tmp/{job_id}_{suffix}_black_out.png"
+        temp_white_in = f"/tmp/{job_id}_{suffix}_white_in.png"
+        temp_white_out = f"/tmp/{job_id}_{suffix}_white_out.png"
+        
+        try:
+            # Guardamos temporales en disco
+            Image.fromarray(np.clip(img_sobre_negro, 0, 255).astype(np.uint8)).save(temp_black_in)
+            Image.fromarray(np.clip(img_sobre_blanco, 0, 255).astype(np.uint8)).save(temp_white_in)
+            
+            # 2. UPSCALE CON IA x3 (models-pro)
+            ejecutar_realcugan_obediente(temp_black_in, temp_black_out)
+            ejecutar_realcugan_obediente(temp_white_in, temp_white_out)
+            
+            # 3. RECONSTRUCCIÓN MATEMÁTICA SEGURA
+            out_black_img = Image.open(temp_black_out).convert("RGB")
+            out_white_img = Image.open(temp_white_out).convert("RGB")
+            
+            out_black = np.array(out_black_img).astype(np.float32)
+            out_white = np.array(out_white_img).astype(np.float32)
+            
+            # La diferencia nos da la transparencia invertida
+            diferencia = out_white - out_black
+            diferencia_gris = np.mean(diferencia, axis=2)
+            diferencia_gris = np.clip(diferencia_gris, 0, 255)
+            
+            # Extraemos el canal Alpha final escalado
+            alfa_final = 255.0 - diferencia_gris
+            alfa_final = np.clip(alfa_final, 0, 255)
+            
+            alfa_final_norm = alfa_final / 255.0
+            alfa_final_norm_3d = alfa_final_norm[..., None]
+            
+            # Creamos un denominador seguro reemplazando los ceros por 1.0
+            denominador_seguro = np.where(alfa_final_norm_3d > 0, alfa_final_norm_3d, 1.0)
+            rgb_final = out_black / denominador_seguro
+            
+            # Forzamos a negro absoluto (0) los píxeles 100% transparentes
+            rgb_final[alfa_final_norm_3d[..., 0] == 0] = 0
+            
+            # Aplicar threshold estricto al alfa para evitar base blanca fantasma en DTF
+            alfa_final = np.where(alfa_final > 127, 255, 0)
+            
+            rgb_final = np.clip(rgb_final, 0, 255).astype(np.uint8)
+            alfa_final = alfa_final.astype(np.uint8)
+            
+            # Ensamblaje final de canales
+            final_rgba = np.concatenate([rgb_final, alfa_final[..., None]], axis=-1)
+            return Image.fromarray(final_rgba, "RGBA")
+            
+        finally:
+            # LIMPIEZA ESTRICTA DEL DISCO
+            for temp_file in [temp_black_in, temp_black_out, temp_white_in, temp_white_out]:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+
     def handler(job):
         job_input = job['input']
         job_id = job['id']
         
-        # Parámetros enviados desde Vercel
         prompt = job_input.get('prompt', "A detailed 2D vector illustration, comic style")
         image_url = job_input.get('image_url')
         print_width_cm = int(job_input.get('print_width_cm', 28))
         print_height_cm = int(job_input.get('print_height_cm', 28))
-        strength = float(job_input.get('strength', 0.75)) # Qué tanto cambiar la imagen original
+        strength = float(job_input.get('strength', 0.75))
         
         if not pipeline_qwen:
             return {"error": "Los modelos no están cargados correctamente. Revisa los logs de inicialización."}
@@ -114,15 +223,14 @@ try:
             return {"error": "Se requiere una image_url base para la transformación Img2Img."}
 
         print(f"Job {job_id}: Procesando a {print_width_cm}x{print_height_cm}cm")
-
+        
         try:
-            # Descargar imagen base
+            # 1. Descargar imagen base
             response = requests.get(image_url)
-            input_image = Image.open(io.BytesIO(response.content)).convert("RGBA") # Directo a RGBA
+            input_image = Image.open(io.BytesIO(response.content)).convert("RGBA")
             
-            # Inferencia Tubería Dual en la H100
+            # 2. Inferencia Qwen Nativa en H100
             with torch.inference_mode():
-                # Extraer capas con Qwen (El Cirujano)
                 qwen_inputs = {
                     "image": input_image,
                     "generator": torch.Generator(device='cuda').manual_seed(777),
@@ -132,44 +240,37 @@ try:
                 qwen_output = pipeline_qwen(**qwen_inputs)
                 output_image_layers = qwen_output.images[0]
 
-            # PASO 3: Limpiar polvo, Acoplar (Compositing) y Subir
+            # 3. Procesamiento y Escalado Matemático x3
             composite_img = None
             clean_layers = []
-            
-            for i, layer_img in enumerate(output_image_layers):
-                # Limpiar polvo: Alpha < 20 = 0
-                l_img = layer_img.convert("RGBA")
-                r, g, b, a = l_img.split()
-                alfa_np = np.array(a)
-                alfa_np[alfa_np < 20] = 0
-                alfa_limpio = Image.fromarray(alfa_np)
-                clean_layer = Image.merge("RGBA", (r, g, b, alfa_limpio))
-                clean_layers.append(clean_layer)
-                
-                # Ignoramos la capa 0 para el composite (fondo de Qwen)
-                if i > 0:
-                    if composite_img is None:
-                        composite_img = clean_layer.copy()
-                    else:
-                        composite_img.alpha_composite(clean_layer)
-
-            # Fallback en caso de que solo haya capa 0
-            if composite_img is None:
-                composite_img = clean_layers[0]
-
             layer_urls = []
             
-            # Subir el composite (Acoplado)
+            for i, layer_img in enumerate(output_image_layers):
+                print(f"Aplicando Método de Dos Fondos a la capa {i}...")
+                upscaled_layer = process_layer_with_math(layer_img, job_id, f"layer_{i}")
+                clean_layers.append(upscaled_layer)
+                
+                # Ignoramos la capa 0 (fondo) para el composite final
+                if i > 0:
+                    if composite_img is None:
+                        composite_img = upscaled_layer.copy()
+                    else:
+                        composite_img.alpha_composite(upscaled_layer)
+
+            # Fallback
+            if composite_img is None:
+                composite_img = clean_layers[0]
+            
+            # 4. Subir a R2 (Todo ya está escalado y limpio)
             composite_url = process_and_upload_layer(composite_img, "final_composite", job_id, print_width_cm, print_height_cm)
             
-            # Subir capas segmentadas individuales
             for i, c_layer in enumerate(clean_layers):
                 url = process_and_upload_layer(c_layer, f"layer_{i}", job_id, print_width_cm, print_height_cm)
                 layer_urls.append({"name": f"layer_{i}.png", "url": url})
                 
             return {
                 "success": True,
-                "message": "Extracción y Acoplado completado exitosamente.",
+                "message": "Extracción Nativa y Escalado Matemático completados.",
                 "composite_url": composite_url,
                 "layers": layer_urls
             }
