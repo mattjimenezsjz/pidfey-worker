@@ -13,30 +13,24 @@ try:
     # Si esto se pone después, Python lo ignora y descarga en el disco temporal de 5GB.
     os.environ["HF_HOME"] = "/runpod-volume/models/huggingface"
     
-    # --- PRE-FLIGHT CHECK: Instalar Vulkan en caliente ---
-    print("Instalando dependencias de Vulkan por hardware...")
-    subprocess.run(["apt-get", "update"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["apt-get", "install", "-y", "libvulkan1", "vulkan-tools"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    # Inyectar el driver de la H100 (NVIDIA ICD) para evitar el emulador llvmpipe
-    icd_dir = "/etc/vulkan/icd.d"
-    os.makedirs(icd_dir, exist_ok=True)
-    icd_path = os.path.join(icd_dir, "nvidia_icd.json")
-    if not os.path.exists(icd_path):
-        import json
-        nvidia_icd = {
-            "file_format_version": "1.0.0",
-            "ICD": {
-                "library_path": "libGLX_nvidia.so.0",
-                "api_version": "1.3.0"
-            }
-        }
-        with open(icd_path, "w") as f:
-            json.dump(nvidia_icd, f)
-            
-    # Forzar a Vulkan a usar solo este driver
-    os.environ["VK_ICD_FILENAMES"] = icd_path
-    print("Vulkan puenteado a NVIDIA H100 exitosamente.")
+    # --- PRE-FLIGHT CHECK: Cargar CUGAN PyTorch Nativo en H100 ---
+    import sys
+    sys.path.append("/runpod-volume/bin/cugan-pytorch")
+    try:
+        from upcunet_v3 import RealWaifuUpScaler
+        print("Cargando Real-CUGAN nativo en la NVIDIA H100 (FP16)...")
+        # Instanciamos el modelo globalmente en la GPU. 
+        # half=True activa la Precisión FP16 (el triple de rápido en la H100)
+        cugan_upscaler = RealWaifuUpScaler(
+            scale=4, 
+            weight_path="/runpod-volume/bin/cugan-pytorch/up4x-latest-conservative.pth", 
+            half=True, 
+            device="cuda:0"
+        )
+        print("CUGAN cargado exitosamente en VRAM.")
+    except Exception as e:
+        print(f"Advertencia: No se pudo cargar PyTorch CUGAN. Error: {e}")
+        cugan_upscaler = None
     
     import boto3
     import shutil
@@ -123,33 +117,6 @@ try:
         s3_client.upload_fileobj(buffer, R2_BUCKET_NAME, file_key, ExtraArgs={"ContentType": "image/png"})
         return f"{R2_PUBLIC_DOMAIN}/{file_key}"
 
-    def ejecutar_realcugan_obediente(input_path, output_path):
-        # En RunPod Serverless, el disco de red se monta en /runpod-volume
-        cugan_dir = "/runpod-volume/bin/cugan"
-        cugan_bin = os.path.join(cugan_dir, "realcugan-ncnn-vulkan")
-        models_dir = "models-se"  # Debe ser relativo por un bug de CUGAN
-        
-        # Otorga permisos de ejecución por si acaso
-        if os.path.exists(cugan_bin):
-            os.chmod(cugan_bin, 0o755)
-            
-        cmd = [
-            cugan_bin, 
-            "-i", input_path, 
-            "-o", output_path, 
-            "-s", "4",
-            "-m", models_dir,
-            "-n", "0", 
-            "-t", "400",
-            "-j", "1:1:1"
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=cugan_dir)
-        print(f"CUGAN Verbose: {result.stderr}")
-        if result.returncode != 0:
-            print(f"Error CUGAN: {result.stderr}")
-            raise Exception("Fallo en el upscaler de Real-CUGAN.")
-        return output_path
-
     def process_layer_with_math(layer_img: Image.Image, job_id: str, suffix: str):
         # Aseguramos RGBA y pasamos a numpy float32
         layer_img = layer_img.convert("RGBA")
@@ -171,62 +138,46 @@ try:
         img_sobre_negro = rgb * alfa_3d
         img_sobre_blanco = (rgb * alfa_3d) + (255.0 * (1.0 - alfa_3d))
         
-        # Rutas temporales (RAM Disk ultra rápido)
-        temp_black_in = f"/dev/shm/{job_id}_{suffix}_black_in.png"
-        temp_black_out = f"/dev/shm/{job_id}_{suffix}_black_out.png"
-        temp_white_in = f"/dev/shm/{job_id}_{suffix}_white_in.png"
-        temp_white_out = f"/dev/shm/{job_id}_{suffix}_white_out.png"
+        img_sobre_negro = np.clip(img_sobre_negro, 0, 255).astype(np.uint8)
+        img_sobre_blanco = np.clip(img_sobre_blanco, 0, 255).astype(np.uint8)
         
-        try:
-            # Guardamos temporales en disco RAM (con mínima compresión para salvar CPU)
-            Image.fromarray(np.clip(img_sobre_negro, 0, 255).astype(np.uint8)).save(temp_black_in, compress_level=1)
-            Image.fromarray(np.clip(img_sobre_blanco, 0, 255).astype(np.uint8)).save(temp_white_in, compress_level=1)
+        # 2. UPSCALE CON IA x4 EN RAM (PyTorch Nativo)
+        if not cugan_upscaler:
+            raise Exception("Real-CUGAN PyTorch no está cargado.")
             
-            # 2. UPSCALE CON IA x3 (models-pro)
-            ejecutar_realcugan_obediente(temp_black_in, temp_black_out)
-            ejecutar_realcugan_obediente(temp_white_in, temp_white_out)
-            
-            # 3. RECONSTRUCCIÓN MATEMÁTICA SEGURA
-            out_black_img = Image.open(temp_black_out).convert("RGB")
-            out_white_img = Image.open(temp_white_out).convert("RGB")
-            
-            out_black = np.array(out_black_img).astype(np.float32)
-            out_white = np.array(out_white_img).astype(np.float32)
-            
-            # La diferencia nos da la transparencia invertida
-            diferencia = out_white - out_black
-            diferencia_gris = np.mean(diferencia, axis=2)
-            diferencia_gris = np.clip(diferencia_gris, 0, 255)
-            
-            # Extraemos el canal Alpha final escalado
-            alfa_final = 255.0 - diferencia_gris
-            alfa_final = np.clip(alfa_final, 0, 255)
-            
-            alfa_final_norm = alfa_final / 255.0
-            alfa_final_norm_3d = alfa_final_norm[..., None]
-            
-            # Creamos un denominador seguro reemplazando los ceros por 1.0
-            denominador_seguro = np.where(alfa_final_norm_3d > 0, alfa_final_norm_3d, 1.0)
-            rgb_final = out_black / denominador_seguro
-            
-            # Forzamos a negro absoluto (0) los píxeles 100% transparentes
-            rgb_final[alfa_final_norm_3d[..., 0] == 0] = 0
-            
-            # Aplicar threshold estricto al alfa para evitar base blanca fantasma en DTF
-            alfa_final = np.where(alfa_final > 127, 255, 0)
-            
-            rgb_final = np.clip(rgb_final, 0, 255).astype(np.uint8)
-            alfa_final = alfa_final.astype(np.uint8)
-            
-            # Ensamblaje final de canales
-            final_rgba = np.concatenate([rgb_final, alfa_final[..., None]], axis=-1)
-            return Image.fromarray(final_rgba, "RGBA")
-            
-        finally:
-            # LIMPIEZA ESTRICTA DEL DISCO
-            for temp_file in [temp_black_in, temp_black_out, temp_white_in, temp_white_out]:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
+        # tile_mode=2 divide la carga para que quepa en VRAM cómodamente
+        out_black = cugan_upscaler(img_sobre_negro, tile_mode=2, cache_mode=0, alpha=1).astype(np.float32)
+        out_white = cugan_upscaler(img_sobre_blanco, tile_mode=2, cache_mode=0, alpha=1).astype(np.float32)
+        
+        # 3. RECONSTRUCCIÓN MATEMÁTICA SEGURA
+        # La diferencia nos da la transparencia invertida
+        diferencia = out_white - out_black
+        diferencia_gris = np.mean(diferencia, axis=2)
+        diferencia_gris = np.clip(diferencia_gris, 0, 255)
+        
+        # Extraemos el canal Alpha final escalado
+        alfa_final = 255.0 - diferencia_gris
+        alfa_final = np.clip(alfa_final, 0, 255)
+        
+        alfa_final_norm = alfa_final / 255.0
+        alfa_final_norm_3d = alfa_final_norm[..., None]
+        
+        # Creamos un denominador seguro reemplazando los ceros por 1.0
+        denominador_seguro = np.where(alfa_final_norm_3d > 0, alfa_final_norm_3d, 1.0)
+        rgb_final = out_black / denominador_seguro
+        
+        # Forzamos a negro absoluto (0) los píxeles 100% transparentes
+        rgb_final[alfa_final_norm_3d[..., 0] == 0] = 0
+        
+        # Aplicar threshold estricto al alfa para evitar base blanca fantasma en DTF
+        alfa_final = np.where(alfa_final > 127, 255, 0)
+        
+        rgb_final = np.clip(rgb_final, 0, 255).astype(np.uint8)
+        alfa_final = alfa_final.astype(np.uint8)
+        
+        # Ensamblaje final de canales
+        final_rgba = np.concatenate([rgb_final, alfa_final[..., None]], axis=-1)
+        return Image.fromarray(final_rgba, "RGBA")
 
     def handler(job):
         job_input = job['input']
