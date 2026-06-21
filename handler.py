@@ -144,6 +144,7 @@ try:
             "-j", "1:1:1"
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=cugan_dir)
+        print(f"CUGAN Verbose: {result.stderr}")
         if result.returncode != 0:
             print(f"Error CUGAN: {result.stderr}")
             raise Exception("Fallo en el upscaler de Real-CUGAN.")
