@@ -244,9 +244,8 @@ try:
                     "num_inference_steps": 32,
                     "layers": 4,
                     "negative_prompt": "solid white background, flat white outside the design, empty white space outside the design, white background islands outside the design",
-                    "true_cfg_scale": 3.5,
+                    "true_cfg_scale": 3.0,
                     "cfg_normalize": True,
-                    "use_en_prompt": True,
                     
                 }
                 qwen_output = pipeline_qwen(**qwen_inputs)
