@@ -241,10 +241,10 @@ try:
                 qwen_inputs = {
                     "image": input_image,
                     "generator": torch.Generator(device='cuda').manual_seed(777),
-                    "num_inference_steps": 35,
+                    "num_inference_steps": 32,
                     "layers": 4,
                     "negative_prompt": "solid white background, flat white outside the design, empty white space outside the design, white background islands outside the design",
-                    "true_cfg_scale": 4.0,
+                    "true_cfg_scale": 3.5,
                     "cfg_normalize": True,
                     "use_en_prompt": True,
                     
