@@ -31,6 +31,21 @@ try:
     except Exception as e:
         print(f"Advertencia: No se pudo cargar PyTorch CUGAN. Error: {e}")
         cugan_upscaler = None
+        
+    # --- PRE-FLIGHT CHECK: Cargar Real-ESRGAN Nativo (Fotorrealismo/3D) ---
+    sys.path.append("/runpod-volume/bin/realesrgan")
+    try:
+        from realesrgan_standalone import RealESRGAN_Standalone
+        print("Cargando Real-ESRGAN nativo en la NVIDIA H100 (FP16)...")
+        esrgan_upscaler = RealESRGAN_Standalone(
+            weight_path="/runpod-volume/bin/realesrgan/RealESRGAN_x4plus.pth",
+            half=True,
+            device="cuda:0"
+        )
+        print("Real-ESRGAN cargado exitosamente en VRAM.")
+    except Exception as e:
+        print(f"Advertencia: No se pudo cargar Real-ESRGAN. Error: {e}")
+        esrgan_upscaler = None
     
     import boto3
     import shutil
@@ -117,7 +132,7 @@ try:
         s3_client.upload_fileobj(buffer, R2_BUCKET_NAME, file_key, ExtraArgs={"ContentType": "image/png"})
         return f"{R2_PUBLIC_DOMAIN}/{file_key}"
 
-    def process_layer_with_math(layer_img: Image.Image, job_id: str, suffix: str):
+    def process_layer_with_math(layer_img: Image.Image, job_id: str, suffix: str, preset: str):
         # Aseguramos RGBA y pasamos a numpy float32
         layer_img = layer_img.convert("RGBA")
         img_np = np.array(layer_img).astype(np.float32)
@@ -142,12 +157,18 @@ try:
         img_sobre_blanco = np.clip(img_sobre_blanco, 0, 255).astype(np.uint8)
         
         # 2. UPSCALE CON IA x4 EN RAM (PyTorch Nativo)
-        if not cugan_upscaler:
-            raise Exception("Real-CUGAN PyTorch no está cargado.")
-            
-        # tile_mode=2 divide la carga para que quepa en VRAM cómodamente
-        out_black = cugan_upscaler(img_sobre_negro, tile_mode=2, cache_mode=0, alpha=1).astype(np.float32)
-        out_white = cugan_upscaler(img_sobre_blanco, tile_mode=2, cache_mode=0, alpha=1).astype(np.float32)
+        if preset in ["photorealism", "3d_render"]:
+            if not esrgan_upscaler:
+                raise Exception("Real-ESRGAN Standalone no está cargado.")
+            # tile=512 divide la carga para VRAM
+            out_black = esrgan_upscaler.upscale(img_sobre_negro, tile=512).astype(np.float32)
+            out_white = esrgan_upscaler.upscale(img_sobre_blanco, tile=512).astype(np.float32)
+        else:
+            if not cugan_upscaler:
+                raise Exception("Real-CUGAN PyTorch no está cargado.")
+            # tile_mode=2 divide la carga para que quepa en VRAM cómodamente
+            out_black = cugan_upscaler(img_sobre_negro, tile_mode=2, cache_mode=0, alpha=1).astype(np.float32)
+            out_white = cugan_upscaler(img_sobre_blanco, tile_mode=2, cache_mode=0, alpha=1).astype(np.float32)
         
         # 3. RECONSTRUCCIÓN MATEMÁTICA SEGURA
         # La diferencia nos da la transparencia invertida
@@ -184,6 +205,7 @@ try:
         job_id = job['id']
         
         prompt = job_input.get('prompt', "A detailed 2D vector illustration, comic style")
+        preset = job_input.get('preset', 'lineart')
         image_url = job_input.get('image_url')
         print_width_cm = int(job_input.get('print_width_cm', 28))
         print_height_cm = int(job_input.get('print_height_cm', 28))
@@ -221,7 +243,7 @@ try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(output_image_layers)) as executor:
                 futuros = {}
                 for i, layer_img in enumerate(output_image_layers):
-                    futuro = executor.submit(process_layer_with_math, layer_img, job_id, f"layer_{i}")
+                    futuro = executor.submit(process_layer_with_math, layer_img, job_id, f"layer_{i}", preset)
                     futuros[futuro] = i
                     
                 for futuro in concurrent.futures.as_completed(futuros):
