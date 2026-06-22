@@ -241,8 +241,13 @@ try:
                 qwen_inputs = {
                     "image": input_image,
                     "generator": torch.Generator(device='cuda').manual_seed(777),
-                    "num_inference_steps": 30,
-                    "layers": 4, 
+                    "num_inference_steps": 35,
+                    "layers": 4,
+                    "negative_prompt": "solid white background, flat white outside the design, empty white space outside the design, white background islands outside the design",
+                    "true_cfg_scale": 4.0,
+                    "cfg_normalize": True,
+                    "use_en_prompt": True,
+                    
                 }
                 qwen_output = pipeline_qwen(**qwen_inputs)
                 output_image_layers = qwen_output.images[0]
