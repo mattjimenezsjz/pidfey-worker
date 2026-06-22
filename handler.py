@@ -236,7 +236,7 @@ try:
             response = requests.get(image_url)
             input_image = Image.open(io.BytesIO(response.content)).convert("RGBA")
             
-            # 2. Inferencia Qwen Nativa en H100
+            # 2. Inferencia Qwen Nativa en H100, forzando la actualizacion.
             with torch.inference_mode():
                 qwen_inputs = {
                     "image": input_image,
