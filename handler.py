@@ -162,23 +162,29 @@ try:
                 raise Exception("Real-ESRGAN Standalone no está cargado.")
             # tile=512 divide la carga para VRAM
             out_black = esrgan_upscaler.upscale(img_sobre_negro, tile=512).astype(np.float32)
-            out_white = esrgan_upscaler.upscale(img_sobre_blanco, tile=512).astype(np.float32)
+            
+            # Para Real-ESRGAN NO usamos el truco matemático de fondo blanco porque genera halos.
+            # Escalamos el canal Alpha original x4 usando interpolación pura de PIL (Lanczos) para suavidad perfecta.
+            alpha_pil = Image.fromarray(a.astype(np.uint8), mode='L')
+            out_alpha = np.array(alpha_pil.resize((out_black.shape[1], out_black.shape[0]), Image.LANCZOS)).astype(np.float32)
+            alfa_final = np.clip(out_alpha, 0, 255)
+            
         else:
             if not cugan_upscaler:
                 raise Exception("Real-CUGAN PyTorch no está cargado.")
             # tile_mode=2 divide la carga para que quepa en VRAM cómodamente
             out_black = cugan_upscaler(img_sobre_negro, tile_mode=2, cache_mode=0, alpha=1).astype(np.float32)
             out_white = cugan_upscaler(img_sobre_blanco, tile_mode=2, cache_mode=0, alpha=1).astype(np.float32)
-        
-        # 3. RECONSTRUCCIÓN MATEMÁTICA SEGURA
-        # La diferencia nos da la transparencia invertida
-        diferencia = out_white - out_black
-        diferencia_gris = np.mean(diferencia, axis=2)
-        diferencia_gris = np.clip(diferencia_gris, 0, 255)
-        
-        # Extraemos el canal Alpha final escalado
-        alfa_final = 255.0 - diferencia_gris
-        alfa_final = np.clip(alfa_final, 0, 255)
+            
+            # 3. RECONSTRUCCIÓN MATEMÁTICA SEGURA (Solo CUGAN)
+            # La diferencia nos da la transparencia invertida
+            diferencia = out_white - out_black
+            diferencia_gris = np.mean(diferencia, axis=2)
+            diferencia_gris = np.clip(diferencia_gris, 0, 255)
+            
+            # Extraemos el canal Alpha final escalado
+            alfa_final = 255.0 - diferencia_gris
+            alfa_final = np.clip(alfa_final, 0, 255)
         
         alfa_final_norm = alfa_final / 255.0
         alfa_final_norm_3d = alfa_final_norm[..., None]
@@ -236,7 +242,8 @@ try:
                 output_image_layers = qwen_output.images[0]
 
             # 3. Procesamiento y Escalado Matemático x4 (Multihilo)
-            print("Lanzando procesos de Real-CUGAN en paralelo (Multihilo)...")
+            motor = "Real-ESRGAN" if preset in ["photorealism", "3d_render"] else "Real-CUGAN"
+            print(f"Lanzando procesos de {motor} en paralelo (Multihilo)...")
             clean_layers = [None] * len(output_image_layers)
             layer_urls = []
             
@@ -250,7 +257,7 @@ try:
                     indice = futuros[futuro]
                     try:
                         clean_layers[indice] = futuro.result()
-                        print(f"Capa {indice} procesada exitosamente con CUGAN.")
+                        print(f"Capa {indice} procesada exitosamente con {motor}.")
                     except Exception as e:
                         print(f"Error procesando la capa {indice}: {e}")
                         raise e
