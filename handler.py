@@ -13,39 +13,7 @@ try:
     # Si esto se pone después, Python lo ignora y descarga en el disco temporal de 5GB.
     os.environ["HF_HOME"] = "/runpod-volume/models/huggingface"
     
-    # --- PRE-FLIGHT CHECK: Cargar CUGAN PyTorch Nativo en H100 ---
-    import sys
-    sys.path.append("/runpod-volume/bin/cugan-pytorch")
-    try:
-        from upcunet_v3 import RealWaifuUpScaler
-        print("Cargando Real-CUGAN nativo en la NVIDIA H100 (FP16)...")
-        # Instanciamos el modelo globalmente en la GPU. 
-        # half=True activa la Precisión FP16 (el triple de rápido en la H100)
-        cugan_upscaler = RealWaifuUpScaler(
-            scale=4, 
-            weight_path="/runpod-volume/bin/cugan-pytorch/up4x-latest-conservative.pth", 
-            half=True, 
-            device="cuda:0"
-        )
-        print("CUGAN cargado exitosamente en VRAM.")
-    except Exception as e:
-        print(f"Advertencia: No se pudo cargar PyTorch CUGAN. Error: {e}")
-        cugan_upscaler = None
-        
-    # --- PRE-FLIGHT CHECK: Cargar Real-ESRGAN Nativo (Fotorrealismo/3D) ---
-    sys.path.append("/runpod-volume/bin/realesrgan")
-    try:
-        from realesrgan_standalone import RealESRGAN_Standalone
-        print("Cargando Real-ESRGAN nativo en la NVIDIA H100 (FP16)...")
-        esrgan_upscaler = RealESRGAN_Standalone(
-            weight_path="/runpod-volume/bin/realesrgan/RealESRGAN_x4plus.pth",
-            half=True,
-            device="cuda:0"
-        )
-        print("Real-ESRGAN cargado exitosamente en VRAM.")
-    except Exception as e:
-        print(f"Advertencia: No se pudo cargar Real-ESRGAN. Error: {e}")
-        esrgan_upscaler = None
+    # (Los upscalers CUGAN y Real-ESRGAN han sido removidos para preservar la resolución nativa y semitonos)
     
     import boto3
     import shutil
@@ -137,80 +105,17 @@ try:
         layer_img = layer_img.convert("RGBA")
         img_np = np.array(layer_img).astype(np.float32)
         
-        r = img_np[:, :, 0]
-        g = img_np[:, :, 1]
-        b = img_np[:, :, 2]
+        # Extraemos el canal alpha
         a = img_np[:, :, 3]
         
-        # Limpiar polvo: Alpha < 20 = 0
+        # Limpiar polvo: Alpha < 20 = 0 (Conservamos los semitonos de Qwen intactos)
         a[a < 20] = 0
         
-        rgb = np.stack([r, g, b], axis=-1)
-        alfa_norm = a / 255.0
-        alfa_3d = alfa_norm[..., None]
+        # Actualizamos el canal alpha
+        img_np[:, :, 3] = a
         
-        # 1. Crear las dos imágenes base (Fondo Negro y Fondo Blanco)
-        img_sobre_negro = rgb * alfa_3d
-        img_sobre_blanco = (rgb * alfa_3d) + (255.0 * (1.0 - alfa_3d))
-        
-        img_sobre_negro = np.clip(img_sobre_negro, 0, 255).astype(np.uint8)
-        img_sobre_blanco = np.clip(img_sobre_blanco, 0, 255).astype(np.uint8)
-        
-        # 2. UPSCALE CON IA x4 EN RAM (PyTorch Nativo)
-        if preset in ["photorealism", "3d_render"]:
-            if not esrgan_upscaler:
-                raise Exception("Real-ESRGAN Standalone no está cargado.")
-            
-            # Para Real-ESRGAN NO usamos matemática de fondo blanco ni negro.
-            # Escalamos el RGB puro (para evitar que la GAN alucine halos grises sobre el negro).
-            rgb_clean = np.clip(rgb, 0, 255).astype(np.uint8)
-            out_rgb = esrgan_upscaler.upscale(rgb_clean, tile=512).astype(np.float32)
-            
-            # Escalamos el Alpha original x4 usando interpolación pura de PIL (Lanczos) para suavidad perfecta.
-            alpha_pil = Image.fromarray(a.astype(np.uint8), mode='L')
-            out_alpha = np.array(alpha_pil.resize((out_rgb.shape[1], out_rgb.shape[0]), Image.LANCZOS)).astype(np.float32)
-            
-            rgb_final = np.clip(out_rgb, 0, 255).astype(np.uint8)
-            alfa_final = np.clip(out_alpha, 0, 255).astype(np.uint8)
-            
-            # Forzamos negro puro donde el alpha es absolutamente 0 (para no gastar tinta)
-            # PERO NO aplicamos threshold > 127, manteniendo la suavidad real del cabello.
-            rgb_final[alfa_final == 0] = 0
-            
-        else:
-            if not cugan_upscaler:
-                raise Exception("Real-CUGAN PyTorch no está cargado.")
-            # tile_mode=2 divide la carga para que quepa en VRAM cómodamente
-            out_black = cugan_upscaler(img_sobre_negro, tile_mode=2, cache_mode=0, alpha=1).astype(np.float32)
-            out_white = cugan_upscaler(img_sobre_blanco, tile_mode=2, cache_mode=0, alpha=1).astype(np.float32)
-            
-            # 3. RECONSTRUCCIÓN MATEMÁTICA SEGURA (Solo CUGAN)
-            diferencia = out_white - out_black
-            diferencia_gris = np.mean(diferencia, axis=2)
-            diferencia_gris = np.clip(diferencia_gris, 0, 255)
-            
-            alfa_final = 255.0 - diferencia_gris
-            alfa_final = np.clip(alfa_final, 0, 255)
-            
-            alfa_final_norm = alfa_final / 255.0
-            alfa_final_norm_3d = alfa_final_norm[..., None]
-            
-            # Creamos un denominador seguro reemplazando los ceros por 1.0 (Solo CUGAN)
-            denominador_seguro = np.where(alfa_final_norm_3d > 0, alfa_final_norm_3d, 1.0)
-            rgb_final = out_black / denominador_seguro
-            
-            # Forzamos a negro absoluto (0) los píxeles 100% transparentes
-            rgb_final[alfa_final_norm_3d[..., 0] == 0] = 0
-            
-            # Aplicar threshold estricto al alfa para evitar base blanca fantasma en vectores DTF
-            alfa_final = np.where(alfa_final > 127, 255, 0)
-            
-            rgb_final = np.clip(rgb_final, 0, 255).astype(np.uint8)
-            alfa_final = alfa_final.astype(np.uint8)
-        
-        # Ensamblaje final de canales
-        final_rgba = np.concatenate([rgb_final, alfa_final[..., None]], axis=-1)
-        return Image.fromarray(final_rgba, "RGBA")
+        # Retornamos la imagen limpia en su resolución nativa
+        return Image.fromarray(img_np.astype(np.uint8), "RGBA")
 
     def handler(job):
         job_input = job['input']
@@ -249,9 +154,8 @@ try:
                 qwen_output = pipeline_qwen(**qwen_inputs)
                 output_image_layers = qwen_output.images[0]
 
-            # 3. Procesamiento y Escalado Matemático x4 (Multihilo)
-            motor = "Real-ESRGAN" if preset in ["photorealism", "3d_render"] else "Real-CUGAN"
-            print(f"Lanzando procesos de {motor} en paralelo (Multihilo)...")
+            # 3. Limpieza de Polvo en Paralelo (Multihilo)
+            print("Lanzando filtro de limpieza de polvo en paralelo...")
             clean_layers = [None] * len(output_image_layers)
             layer_urls = []
             
@@ -265,9 +169,9 @@ try:
                     indice = futuros[futuro]
                     try:
                         clean_layers[indice] = futuro.result()
-                        print(f"Capa {indice} procesada exitosamente con {motor}.")
+                        print(f"Capa {indice} limpiada exitosamente.")
                     except Exception as e:
-                        print(f"Error procesando la capa {indice}: {e}")
+                        print(f"Error limpiando la capa {indice}: {e}")
                         raise e
                         
             # Ensamblamos el composite respetando el orden de las capas
@@ -323,7 +227,7 @@ try:
                 
             return {
                 "success": True,
-                "message": "Extracción Nativa, Escalado CUGAN y Subida Paralela completados.",
+                "message": "Extracción Nativa, Limpieza de Polvo y Subida Paralela completados.",
                 "composite_url": composite_url,
                 "layers": layer_urls
             }
