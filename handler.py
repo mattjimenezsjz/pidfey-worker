@@ -160,14 +160,22 @@ try:
         if preset in ["photorealism", "3d_render"]:
             if not esrgan_upscaler:
                 raise Exception("Real-ESRGAN Standalone no está cargado.")
-            # tile=512 divide la carga para VRAM
-            out_black = esrgan_upscaler.upscale(img_sobre_negro, tile=512).astype(np.float32)
             
-            # Para Real-ESRGAN NO usamos el truco matemático de fondo blanco porque genera halos.
-            # Escalamos el canal Alpha original x4 usando interpolación pura de PIL (Lanczos) para suavidad perfecta.
+            # Para Real-ESRGAN NO usamos matemática de fondo blanco ni negro.
+            # Escalamos el RGB puro (para evitar que la GAN alucine halos grises sobre el negro).
+            rgb_clean = np.clip(rgb, 0, 255).astype(np.uint8)
+            out_rgb = esrgan_upscaler.upscale(rgb_clean, tile=512).astype(np.float32)
+            
+            # Escalamos el Alpha original x4 usando interpolación pura de PIL (Lanczos) para suavidad perfecta.
             alpha_pil = Image.fromarray(a.astype(np.uint8), mode='L')
-            out_alpha = np.array(alpha_pil.resize((out_black.shape[1], out_black.shape[0]), Image.LANCZOS)).astype(np.float32)
-            alfa_final = np.clip(out_alpha, 0, 255)
+            out_alpha = np.array(alpha_pil.resize((out_rgb.shape[1], out_rgb.shape[0]), Image.LANCZOS)).astype(np.float32)
+            
+            rgb_final = np.clip(out_rgb, 0, 255).astype(np.uint8)
+            alfa_final = np.clip(out_alpha, 0, 255).astype(np.uint8)
+            
+            # Forzamos negro puro donde el alpha es absolutamente 0 (para no gastar tinta)
+            # PERO NO aplicamos threshold > 127, manteniendo la suavidad real del cabello.
+            rgb_final[alfa_final == 0] = 0
             
         else:
             if not cugan_upscaler:
@@ -177,30 +185,28 @@ try:
             out_white = cugan_upscaler(img_sobre_blanco, tile_mode=2, cache_mode=0, alpha=1).astype(np.float32)
             
             # 3. RECONSTRUCCIÓN MATEMÁTICA SEGURA (Solo CUGAN)
-            # La diferencia nos da la transparencia invertida
             diferencia = out_white - out_black
             diferencia_gris = np.mean(diferencia, axis=2)
             diferencia_gris = np.clip(diferencia_gris, 0, 255)
             
-            # Extraemos el canal Alpha final escalado
             alfa_final = 255.0 - diferencia_gris
             alfa_final = np.clip(alfa_final, 0, 255)
-        
-        alfa_final_norm = alfa_final / 255.0
-        alfa_final_norm_3d = alfa_final_norm[..., None]
-        
-        # Creamos un denominador seguro reemplazando los ceros por 1.0
-        denominador_seguro = np.where(alfa_final_norm_3d > 0, alfa_final_norm_3d, 1.0)
-        rgb_final = out_black / denominador_seguro
-        
-        # Forzamos a negro absoluto (0) los píxeles 100% transparentes
-        rgb_final[alfa_final_norm_3d[..., 0] == 0] = 0
-        
-        # Aplicar threshold estricto al alfa para evitar base blanca fantasma en DTF
-        alfa_final = np.where(alfa_final > 127, 255, 0)
-        
-        rgb_final = np.clip(rgb_final, 0, 255).astype(np.uint8)
-        alfa_final = alfa_final.astype(np.uint8)
+            
+            alfa_final_norm = alfa_final / 255.0
+            alfa_final_norm_3d = alfa_final_norm[..., None]
+            
+            # Creamos un denominador seguro reemplazando los ceros por 1.0 (Solo CUGAN)
+            denominador_seguro = np.where(alfa_final_norm_3d > 0, alfa_final_norm_3d, 1.0)
+            rgb_final = out_black / denominador_seguro
+            
+            # Forzamos a negro absoluto (0) los píxeles 100% transparentes
+            rgb_final[alfa_final_norm_3d[..., 0] == 0] = 0
+            
+            # Aplicar threshold estricto al alfa para evitar base blanca fantasma en vectores DTF
+            alfa_final = np.where(alfa_final > 127, 255, 0)
+            
+            rgb_final = np.clip(rgb_final, 0, 255).astype(np.uint8)
+            alfa_final = alfa_final.astype(np.uint8)
         
         # Ensamblaje final de canales
         final_rgba = np.concatenate([rgb_final, alfa_final[..., None]], axis=-1)
