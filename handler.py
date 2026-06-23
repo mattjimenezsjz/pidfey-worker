@@ -100,22 +100,28 @@ try:
         s3_client.upload_fileobj(buffer, R2_BUCKET_NAME, file_key, ExtraArgs={"ContentType": "image/png"})
         return f"{R2_PUBLIC_DOMAIN}/{file_key}"
 
-    def process_layer_with_math(layer_img: Image.Image, job_id: str, suffix: str, preset: str):
-        # Aseguramos RGBA y pasamos a numpy float32
-        layer_img = layer_img.convert("RGBA")
-        img_np = np.array(layer_img).astype(np.float32)
+    def process_layer_mask_to_high_res(qwen_layer_img: Image.Image, original_image: Image.Image):
+        # 1. Extraer máscara de Qwen y pasar a numpy
+        qwen_layer_img = qwen_layer_img.convert("RGBA")
+        qwen_np = np.array(qwen_layer_img)
+        alpha_mask = qwen_np[:, :, 3]
         
-        # Extraemos el canal alpha
-        a = img_np[:, :, 3]
+        # 2. Limpiar polvo: Alpha < 20 = 0
+        alpha_mask[alpha_mask < 20] = 0
         
-        # Limpiar polvo: Alpha < 20 = 0 (Conservamos los semitonos de Qwen intactos)
-        a[a < 20] = 0
+        # 3. Convertir la máscara limpia a imagen PIL (modo "L" = blanco y negro)
+        mask_pil = Image.fromarray(alpha_mask, mode="L")
         
-        # Actualizamos el canal alpha
-        img_np[:, :, 3] = a
+        # 4. Escalar la máscara al tamaño gigante original con interpolación ultrasuave
+        orig_width, orig_height = original_image.size
+        mask_pil_scaled = mask_pil.resize((orig_width, orig_height), Image.LANCZOS)
         
-        # Retornamos la imagen limpia en su resolución nativa
-        return Image.fromarray(img_np.astype(np.uint8), "RGBA")
+        # 5. Clonar la imagen original de Gemini y aplicarle esta nueva máscara gigante
+        # Primero asegurarnos que el clon tiene canal Alpha
+        high_res_clone = original_image.copy().convert("RGBA")
+        high_res_clone.putalpha(mask_pil_scaled)
+        
+        return high_res_clone
 
     def handler(job):
         job_input = job['input']
@@ -154,24 +160,25 @@ try:
                 qwen_output = pipeline_qwen(**qwen_inputs)
                 output_image_layers = qwen_output.images[0]
 
-            # 3. Limpieza de Polvo en Paralelo (Multihilo)
-            print("Lanzando filtro de limpieza de polvo en paralelo...")
+            # 3. Extracción de Máscaras y Escalado a Alta Resolución (Multihilo)
+            print("Extrayendo máscaras de Qwen y aplicándolas a clones gigantes de la imagen original...")
             clean_layers = [None] * len(output_image_layers)
             layer_urls = []
             
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(output_image_layers)) as executor:
                 futuros = {}
                 for i, layer_img in enumerate(output_image_layers):
-                    futuro = executor.submit(process_layer_with_math, layer_img, job_id, f"layer_{i}", preset)
+                    # Pasamos la capa pequeña de Qwen y la imagen original GIGANTE de Gemini
+                    futuro = executor.submit(process_layer_mask_to_high_res, layer_img, input_image)
                     futuros[futuro] = i
                     
                 for futuro in concurrent.futures.as_completed(futuros):
                     indice = futuros[futuro]
                     try:
                         clean_layers[indice] = futuro.result()
-                        print(f"Capa {indice} limpiada exitosamente.")
+                        print(f"Capa {indice} clonada y enmascarada a {input_image.size} exitosamente.")
                     except Exception as e:
-                        print(f"Error limpiando la capa {indice}: {e}")
+                        print(f"Error procesando la capa {indice}: {e}")
                         raise e
                         
             # Ensamblamos el composite respetando el orden de las capas
@@ -227,7 +234,7 @@ try:
                 
             return {
                 "success": True,
-                "message": "Extracción Nativa, Limpieza de Polvo y Subida Paralela completados.",
+                "message": "Enmascarado Alta Resolución (Alpha Masking) y Subida Paralela completados.",
                 "composite_url": composite_url,
                 "layers": layer_urls
             }
